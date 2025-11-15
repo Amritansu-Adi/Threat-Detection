@@ -3,6 +3,7 @@ import sys
 import time
 import logging
 from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor
 
 import cv2
 import numpy as np
@@ -25,15 +26,23 @@ logging.basicConfig(level=logging.INFO)
 # Config
 YOLOV8_WEIGHTS = os.environ.get('YOLOV8_WEIGHTS', os.path.join(os.path.dirname(__file__), 'models', 'weapon_best.pt'))
 YOLOV8_CONF = float(os.environ.get('YOLOV8_CONF', 0.25))
+YOLOV8_PERSON_CONF = float(os.environ.get('YOLOV8_PERSON_CONF', 0.45))
+YOLOV8_PERSON_MIN_AREA = int(os.environ.get('YOLOV8_PERSON_MIN_AREA', 2500))
 WEAPON_CLASS_NAMES = [s.strip().lower() for s in os.environ.get('YOLOV8_WEAPON_CLASSES', 'knife,scissors,gun,pistol,rifle').split(',') if s.strip()]
 USE_GPU = os.environ.get('USE_GPU', '1') == '1'
 WEAPON_DETECT_EVERY_N_FRAMES = int(os.environ.get('WEAPON_DETECT_EVERY_N_FRAMES', 5))
 ALERT_SNAPSHOT_DIR = os.path.join(os.path.dirname(__file__), '..', 'alerts')
 os.makedirs(ALERT_SNAPSHOT_DIR, exist_ok=True)
 # Focused re-inference settings (run on upscaled/processed per-person crops)
+# Focused re-inference settings (run on upscaled/processed per-person crops)
 YOLOV8_FOCUS_CONF = float(os.environ.get('YOLOV8_FOCUS_CONF', 0.20))
 YOLOV8_FOCUS_IMGSZ = int(os.environ.get('YOLOV8_FOCUS_IMGSZ', 1024))
 YOLOV8_FOCUS_MIN_CONF = float(os.environ.get('YOLOV8_FOCUS_MIN_CONF', 0.20))
+YOLOV8_FOCUS_SYNC = os.environ.get('YOLOV8_FOCUS_SYNC', '0') == '1'
+YOLOV8_FOCUS_WORKERS = int(os.environ.get('YOLOV8_FOCUS_WORKERS', 2))
+# Fractional padding to expand person bbox when creating focused crop around a person.
+# Lowering this reduces how much context is included and makes mapped boxes tighter.
+YOLOV8_FOCUS_PAD = float(os.environ.get('YOLOV8_FOCUS_PAD', 0.15))
 
 
 # MediaPipe setup (hands + face mesh)
@@ -66,6 +75,12 @@ else:
     WEAPON_CLASS_IDS = [CLASS_NAME_MAP.get(n) for n in WEAPON_CLASS_NAMES if CLASS_NAME_MAP.get(n) is not None]
     logging.info(f'Person class ids: {PERSON_CLASS_IDS} Weapon class ids: {WEAPON_CLASS_IDS}')
 
+# Async focused inference executor and shared state
+executor = ThreadPoolExecutor(max_workers=YOLOV8_FOCUS_WORKERS)
+pending_futures = []  # list of futures
+latest_refined_weapons = []
+latest_refined_frame_idx = -9999
+
 
 def bbox_center(bbox):
     x1, y1, x2, y2 = bbox
@@ -86,6 +101,15 @@ def bbox_iou(boxA, boxB):
         return 0.0
     iou = interArea / float(boxAArea + boxBArea - interArea)
     return iou
+
+
+def clamp_bbox(bbox, max_w, max_h):
+    x1, y1, x2, y2 = bbox
+    x1 = max(0, min(int(x1), max_w - 1))
+    y1 = max(0, min(int(y1), max_h - 1))
+    x2 = max(0, min(int(x2), max_w - 1))
+    y2 = max(0, min(int(y2), max_h - 1))
+    return x1, y1, x2, y2
 
 
 def preprocess_crop(img, target_size=None):
@@ -124,8 +148,8 @@ def focused_infer_on_person(frame, person_bbox):
         return []
     x1, y1, x2, y2, _ = person_bbox
     h, w = frame.shape[:2]
-    pad_x = int((x2 - x1) * 0.35)
-    pad_y = int((y2 - y1) * 0.35)
+    pad_x = int((x2 - x1) * YOLOV8_FOCUS_PAD)
+    pad_y = int((y2 - y1) * YOLOV8_FOCUS_PAD)
     cx1 = max(0, x1 - pad_x)
     cy1 = max(0, y1 - pad_y)
     cx2 = min(w, x2 + pad_x)
@@ -227,6 +251,10 @@ def detect_humans_and_weapons(frame, run_weapon_detection=True):
             for (b, c, cid) in zip(boxes, confs, clsids):
                 x1, y1, x2, y2 = [int(x) for x in b.tolist()]
                 if int(cid) in PERSON_CLASS_IDS:
+                    # filter persons by confidence and a minimal box area to reduce false positives
+                    area = max(0, (x2 - x1)) * max(0, (y2 - y1))
+                    if float(c) < YOLOV8_PERSON_CONF or area < YOLOV8_PERSON_MIN_AREA:
+                        continue
                     humans.append((x1, y1, x2, y2, float(c)))
                 elif int(cid) in WEAPON_CLASS_IDS and run_weapon_detection:
                     cname = model.names.get(int(cid), str(int(cid))) if hasattr(model, 'names') else str(int(cid))
@@ -234,8 +262,9 @@ def detect_humans_and_weapons(frame, run_weapon_detection=True):
     except Exception as e:
         logging.exception(f'YOLOv8 inference failed: {e}')
 
-    # If camera image clarity is low, try focused re-inference on person crops
-    if run_weapon_detection and len(weapons) == 0 and len(humans) > 0:
+    # Focused re-inference is handled asynchronously by the main loop by default.
+    # If synchronous focused inference is explicitly requested, run it here.
+    if YOLOV8_FOCUS_SYNC and run_weapon_detection and len(weapons) == 0 and len(humans) > 0:
         for p in humans:
             try:
                 more = focused_infer_on_person(frame, p)
@@ -256,6 +285,8 @@ def main():
         ret, frame = cap.read()
         if not ret:
             break
+        # clamp any upstream detection coordinates to frame bounds before drawing
+        fh, fw = frame.shape[:2]
         run_weapon = (frame_idx % WEAPON_DETECT_EVERY_N_FRAMES) == 0
         humans, weapons = detect_humans_and_weapons(frame, run_weapon_detection=run_weapon)
         hands = get_hand_landmarks(frame)
@@ -265,6 +296,7 @@ def main():
         persons = []
         unknown_detected = False
         for (x1, y1, x2, y2, conf) in humans:
+            x1, y1, x2, y2 = clamp_bbox((x1, y1, x2, y2), fw, fh)
             face_img = None
             for fm in face_meshes:
                 fx1, fy1, fx2, fy2 = fm['bbox']
@@ -289,6 +321,7 @@ def main():
         # Map weapons to persons using hands -> center -> iou -> nearest
         weapon_holders = []
         for (wx1, wy1, wx2, wy2, wconf, wlabel) in weapons:
+            wx1, wy1, wx2, wy2 = clamp_bbox((wx1, wy1, wx2, wy2), fw, fh)
             holder = None
             wcenter = bbox_center((wx1, wy1, wx2, wy2))
             mapped = False
@@ -334,9 +367,18 @@ def main():
                         nearest = p['name']
                 holder = nearest
             weapon_holders.append(((wx1, wy1, wx2, wy2, wconf, wlabel), holder))
+            # Draw the detection box and a filled label background for readability
             cv2.rectangle(frame, (wx1, wy1), (wx2, wy2), (0, 0, 255), 2)
             holder_text = holder if holder is not None else 'None'
-            cv2.putText(frame, f'Weapon: {wlabel} {wconf:.2f} Holder:{holder_text}', (wx1, wy1-10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,0,255), 2)
+            label = f'{wlabel} {wconf:.2f} Holder:{holder_text}'
+            (tw, th), baseline = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 1)
+            # position label background above the box (clamped to image)
+            lx1 = wx1
+            ly1 = max(0, wy1 - th - 8)
+            lx2 = wx1 + tw + 10
+            ly2 = wy1
+            cv2.rectangle(frame, (lx1, ly1), (lx2, ly2), (0, 0, 255), -1)
+            cv2.putText(frame, label, (lx1 + 5, ly2 - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
 
         # Threat logic
         threat_level = None
@@ -368,7 +410,15 @@ def main():
         else:
             email_sent = False
 
-        cv2.imshow('YOLOv8 Human & Weapon Detection + FaceNet', frame)
+        # Scale display to fit common screens (max 1280x720) while preserving aspect
+        max_dw, max_dh = 1280, 720
+        fh, fw = frame.shape[:2]
+        scale = min(1.0, max_dw / fw, max_dh / fh)
+        if scale < 1.0:
+            disp = cv2.resize(frame, (int(fw * scale), int(fh * scale)), interpolation=cv2.INTER_AREA)
+        else:
+            disp = frame
+        cv2.imshow('YOLOv8 Human & Weapon Detection + FaceNet', disp)
         if cv2.waitKey(1) & 0xFF == ord('q'):
             break
         frame_idx += 1

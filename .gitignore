@@ -30,7 +30,6 @@ weights/
 camera_detection/models/*.pt
 alerts/
 TEST/out/
-Weapon 2.v2i.yolov8/
 data/*.yaml
 
 # Notebooks
