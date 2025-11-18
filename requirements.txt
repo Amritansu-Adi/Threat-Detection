@@ -1,0 +1,23 @@
+# This file consolidates all Python dependencies for the project.
+# To install, run: pip install -r requirements.txt
+
+# Core ML & Computer Vision
+ultralytics
+torch
+torchvision
+mediapipe
+facenet-pytorch
+opencv-python-headless
+
+# Utilities
+numpy==1.26.4 # Pinned to resolve mediapipe dependency conflict
+Pillow
+requests # For facenet-pytorch model download
+scipy
+matplotlib
+pandas
+seaborn
+tqdm
+IPython # For Colab/Jupyter
+PyYAML
+psutil
