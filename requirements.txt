@@ -9,6 +9,13 @@ mediapipe
 facenet-pytorch
 opencv-python-headless
 
+# Audio Pipeline (2026 Conversational Intuition Standards)
+PyAudio # Real-time audio capture (16kHz mono)
+faster-whisper # INT8 quantized speech recognition (beam_size=1 optimization)
+transformers # DistilHuBERT (SER) + DistilBERT base uncased MNLI (zero-shot intent)
+onnxruntime # Silero VAD ONNX optimization
+librosa # Audio processing utilities
+
 # Utilities
 numpy==1.26.4 # Pinned to resolve mediapipe dependency conflict
 Pillow
