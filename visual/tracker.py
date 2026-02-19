@@ -13,7 +13,7 @@ from collections import deque
 import time
 
 try:
-    from person_tracker import PersonTracker as ByteTrackPersonTracker
+    from utils.person_tracker import PersonTracker as ByteTrackPersonTracker
 except ImportError:
     logging.warning("ByteTrack PersonTracker not available, using stub")
     ByteTrackPersonTracker = None
@@ -203,15 +203,18 @@ class PersonTracker:
                 person = self.active_tracks[best_track_id]
                 person.update_position(det_bbox, self.frame_idx)
                 person.confidence = conf
+                person.last_seen_frame = self.frame_idx  # Ensure it's marked as seen
             else:
                 # Create new track
                 new_id = self._next_id
                 self._next_id += 1
-                self.active_tracks[new_id] = TrackedPerson(
+                new_person = TrackedPerson(
                     id=new_id,
                     bbox=det_bbox,
                     confidence=conf
                 )
+                new_person.update_position(det_bbox, self.frame_idx)  # Initialize position tracking
+                self.active_tracks[new_id] = new_person
 
         # Remove unmatched tracks
         to_remove = []

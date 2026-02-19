@@ -127,12 +127,10 @@ class VisualData:
     """Visual pipeline output with all detection and tracking results."""
 
     timestamp: float  # Frame timestamp
-    frame_idx: int  # Sequential frame index
-    tracked_persons: List[TrackedPerson] = field(default_factory=list)
-    weapons: List[WeaponDetection] = field(default_factory=list)
-    frame_resolution: tuple = (1920, 1080)  # (width, height)
-    fps: float = 30.0  # Frames per second
-    processing_time_ms: float = 0.0  # Time to process frame
+    frame_shape: tuple  # (height, width, channels)
+    persons: List[Dict] = field(default_factory=list)  # Tracked persons as dicts
+    weapons: List[WeaponDetection] = field(default_factory=list)  # Detected weapons
+    processing_stats: Dict = field(default_factory=dict)  # Processing statistics
 
 
 @dataclass

@@ -19,8 +19,8 @@ from concurrent.futures import ThreadPoolExecutor, Future
 try:
     from ultralytics import YOLO
     from facenet_pytorch import MTCNN, InceptionResnetV1
-    from person_tracker import PersonTracker
-    from facenet_recognition import recognize_face, load_known_faces
+    from utils.person_tracker import PersonTracker as ByteTrackPersonTracker
+    from utils.facenet_recognition import recognize_face, load_known_faces
 except ImportError as e:
     logging.critical(f"Failed to import visual detection library: {e}")
     raise

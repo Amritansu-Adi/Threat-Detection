@@ -190,14 +190,16 @@ class WeaponMapper:
             if best_iou > 0.05:
                 return best_person_id_iou
 
-        # 5. Nearest person by centroid
+        # 5. Nearest person by centroid (with distance threshold)
         if persons:
             min_dist = float('inf')
             nearest_person_id = None
+            max_association_dist = 50  # Maximum pixel distance for association
+            
             for person in persons:
                 pc = self._bbox_center(person['bbox'])
-                dist = (pc[0] - wcenter[0])**2 + (pc[1] - wcenter[1])**2
-                if dist < min_dist:
+                dist = ((pc[0] - wcenter[0])**2 + (pc[1] - wcenter[1])**2)**0.5
+                if dist < min_dist and dist <= max_association_dist:
                     min_dist = dist
                     nearest_person_id = person['id']
             return nearest_person_id
