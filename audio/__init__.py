@@ -9,18 +9,18 @@
 __version__ = "0.1.0"
 
 from .vad import SileroVAD
-from .emotion_analyzer import EmotionAnalyzer, Emotion
+# from .emotion_analyzer import EmotionAnalyzer, Emotion  # Temporarily disabled - causes import hang
 from .transcriber import Transcriber
-from .intent_classifier import IntentClassifier, Intent
+# from .intent_classifier import IntentClassifier, Intent  # Temporarily disabled - depends on emotion_analyzer
 from .audio_pipeline import AudioPipeline
 
 __all__ = [
     "SileroVAD",
-    "EmotionAnalyzer",
-    "Emotion",
+    # "EmotionAnalyzer",  # Temporarily disabled
+    # "Emotion",  # Temporarily disabled
     "Transcriber",
-    "IntentClassifier",
-    "Intent",
+    # "IntentClassifier",  # Temporarily disabled
+    # "Intent",  # Temporarily disabled
     "AudioPipeline",
 ]
 

@@ -42,9 +42,9 @@ from datetime import datetime
 from core.data_structures import AudioEvent, EmotionType, IntentType
 from core.queue_manager import QueueManager
 from audio.vad import SileroVAD
-from audio.emotion_analyzer import EmotionAnalyzer, Emotion
+# from audio.emotion_analyzer import EmotionAnalyzer, Emotion  # Temporarily disabled
 from audio.transcriber import Transcriber
-from audio.intent_classifier import IntentClassifier, Intent
+# from audio.intent_classifier import IntentClassifier, Intent  # Temporarily disabled
 
 logger = logging.getLogger(__name__)
 
@@ -87,9 +87,9 @@ class AudioPipeline:
 
         # Initialize stages
         self.vad = SileroVAD(model_path=vad_model_path)
-        self.emotion = EmotionAnalyzer(device=device)
+        # self.emotion = EmotionAnalyzer(device=device)  # Temporarily disabled
         self.transcriber = Transcriber(device=device)
-        self.intent = IntentClassifier(device=device)
+        # self.intent = IntentClassifier(device=device)  # Temporarily disabled
 
         # Audio buffer (5-second sliding window)
         self.audio_buffer = deque(maxlen=self.BUFFER_SIZE)
@@ -180,14 +180,16 @@ class AudioPipeline:
                         # Get full buffer for Stage 2-3 analysis
                         buffer_array = np.array(list(self.audio_buffer), dtype=np.float32)
 
-                        # Stage 2: Emotion analysis
-                        emotion, emotion_conf = self.emotion.analyze(buffer_array)
+                        # Stage 2: Emotion analysis (temporarily disabled)
+                        # emotion, emotion_conf = self.emotion.analyze(buffer_array)
+                        emotion, emotion_conf = None, 0.0
 
                         # Stage 3a: Transcription
                         transcript, transcript_conf = self.transcriber.transcribe(buffer_array)
 
-                        # Stage 3b: Intent classification
-                        intent, intent_conf = self.intent.classify(transcript)
+                        # Stage 3b: Intent classification (temporarily disabled)
+                        # intent, intent_conf = self.intent.classify(transcript)
+                        intent, intent_conf = None, 0.0
 
                         # Create AudioEvent
                         event = AudioEvent(

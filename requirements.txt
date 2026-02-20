@@ -1,30 +1,50 @@
-# This file consolidates all Python dependencies for the project.
-# To install, run: pip install -r requirements.txt
+# Threat Detection System - Complete Dependencies
+# To install in conda env: pip install -r requirements.txt
+# Or: conda env create -f environment.yml
 
 # Core ML & Computer Vision
-ultralytics
-torch
-torchvision
-mediapipe
-facenet-pytorch
-opencv-python-headless
+torch>=2.8.0
+torchvision>=0.23.0
+ultralytics>=8.3.0
+facenet-pytorch>=2.5.3
 
-# Audio Pipeline (2026 Conversational Intuition Standards)
-PyAudio # Real-time audio capture (16kHz mono)
-faster-whisper # INT8 quantized speech recognition (beam_size=1 optimization)
-transformers # DistilHuBERT (SER) + DistilBERT base uncased MNLI (zero-shot intent)
-onnxruntime # Silero VAD ONNX optimization
-librosa # Audio processing utilities
+# Computer Vision - OpenCV (MUST have opencv-python, not opencv-python-headless for display)
+opencv-python>=4.13.0
+opencv-contrib-python>=4.13.0
 
-# Utilities
-numpy==1.26.4 # Pinned to resolve mediapipe dependency conflict
-Pillow
-requests # For facenet-pytorch model download
-scipy
-matplotlib
-pandas
-seaborn
-tqdm
-IPython # For Colab/Jupyter
-PyYAML
-psutil
+# Audio Processing
+sounddevice>=0.5.5
+PyAudio>=0.2.14
+faster-whisper>=1.2.0
+librosa>=0.10.0
+onnxruntime>=1.24.0
+
+# NLP & Emotion Recognition
+transformers>=5.0.0
+tokenizers>=0.22.0
+
+# Hand & Face Detection
+mediapipe>=0.10.0
+pycairo>=1.24.0
+
+# Data & Utilities
+numpy>=2.0.0
+scipy>=1.4.1
+pandas>=1.1.4
+Pillow>=11.0.0
+requests>=2.32.0
+PyYAML>=6.0.0
+tqdm>=4.67.0
+psutil>=7.2.0
+
+# Visualization & Plotting
+matplotlib>=3.10.0
+plotly>=6.5.0
+seaborn>=0.13.0
+
+# Development & Testing
+pytest>=7.0.0
+pytest-cov>=4.0.0
+pytest-mock>=3.0.0
+python-dotenv>=1.0.0
+IPython>=8.0.0

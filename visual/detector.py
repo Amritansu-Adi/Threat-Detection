@@ -104,16 +104,21 @@ class PersonDetector:
             results = self.model(frame, conf=self.conf_threshold, verbose=False)
             detections = []
 
+            logging.info(f"🔍 YOLO raw results: {results is not None}, has boxes: {results and hasattr(results[0], 'boxes')}")
+            
             if results and hasattr(results[0], 'boxes') and results[0].boxes is not None:
                 boxes = results[0].boxes.xyxy.cpu().numpy()
                 confs = results[0].boxes.conf.cpu().numpy()
                 class_ids = results[0].boxes.cls.cpu().numpy().astype(int)
+                
+                logging.info(f"🔍 YOLO boxes: {len(boxes)} detections, classes: {set(class_ids)}")
 
-                for box, conf, class_id in zip(boxes, confs, class_ids):
+                for i, (box, conf, class_id) in enumerate(zip(boxes, confs, class_ids)):
+                    x1, y1, x2, y2 = [int(v) for v in box.tolist()]
+                    area = (x2 - x1) * (y2 - y1)
+                    logging.info(f"  Box {i}: class_id={class_id}, conf={conf:.3f}, area={area}, threshold={self.conf_threshold}, min_area={self.min_area}")
+                    
                     if int(class_id) in self.person_class_ids:
-                        x1, y1, x2, y2 = [int(v) for v in box.tolist()]
-                        area = (x2 - x1) * (y2 - y1)
-
                         if conf >= self.conf_threshold and area >= self.min_area:
                             class_name = self.model.names.get(int(class_id), str(int(class_id)))
                             detections.append(PersonDetection(
@@ -121,11 +126,16 @@ class PersonDetector:
                                 confidence=float(conf),
                                 class_name=class_name
                             ))
+                            logging.info(f"    ✅ PASSED (added to detections)")
+                        else:
+                            logging.info(f"    ❌ REJECTED (conf check: {conf >= self.conf_threshold}, area check: {area >= self.min_area})")
+                    else:
+                        logging.info(f"    ❌ NOT PERSON CLASS")
 
             return detections
 
         except Exception as e:
-            logging.error(f"Person detection failed: {e}")
+            logging.error(f"Person detection failed: {e}", exc_info=True)
             return []
 
 

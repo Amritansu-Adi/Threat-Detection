@@ -37,12 +37,21 @@ class HandDetector:
             min_detection_confidence: Minimum confidence for detection
             min_tracking_confidence: Minimum confidence for tracking
         """
-        self.mp_hands = mp.solutions.hands.Hands(
-            static_image_mode=static_image_mode,
-            max_num_hands=max_num_hands,
-            min_detection_confidence=min_detection_confidence,
-            min_tracking_confidence=min_tracking_confidence
-        )
+        self.available = False
+        self.mp_hands = None
+        
+        try:
+            self.mp_hands = mp.solutions.hands.Hands(
+                static_image_mode=static_image_mode,
+                max_num_hands=max_num_hands,
+                min_detection_confidence=min_detection_confidence,
+                min_tracking_confidence=min_tracking_confidence
+            )
+            self.available = True
+        except (AttributeError, Exception) as e:
+            logger = logging.getLogger(__name__)
+            logger.warning(f"mediapipe hand detection not available: {e} - HandDetector will be stubbed")
+            self.available = False
 
     def detect(self, frame: np.ndarray) -> List[HandLandmarks]:
         """
@@ -54,6 +63,9 @@ class HandDetector:
         Returns:
             List of hand landmarks
         """
+        if not self.available or self.mp_hands is None:
+            return []
+            
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         results = self.mp_hands.process(rgb)
 
