@@ -14,7 +14,7 @@ import threading
 import time
 import logging
 from typing import Optional, Dict, List, Tuple
-from queue import Queue, Full
+import queue
 import cv2
 import numpy as np
 
@@ -49,8 +49,8 @@ class VisualPipeline:
                  face_recognize_every_n_frames: int = 10,
 
                  # Queue config
-                 visual_to_fusion_queue: Optional[Queue] = None,
-                 fusion_to_visual_queue: Optional[Queue] = None):
+                 visual_to_fusion_queue: Optional[queue.Queue] = None,
+                 fusion_to_visual_queue: Optional[queue.Queue] = None):
 
         """
         Initialize visual pipeline.
@@ -105,10 +105,13 @@ class VisualPipeline:
         self.pipeline_thread: Optional[threading.Thread] = None
         self.frame_idx = 0
         self.last_process_time = 0.0
+        self._last_frame: Optional[np.ndarray] = None  # For display
+        self._frame_queue: queue.Queue = queue.Queue(maxsize=1)  # For frame passing
 
         # Statistics
         self.stats = {
             'frames_processed': 0,
+            'frames_submitted': 0,
             'persons_detected': 0,
             'weapons_detected': 0,
             'faces_recognized': 0,
@@ -154,21 +157,31 @@ class VisualPipeline:
         Returns:
             True if frame was accepted for processing
         """
+        print(f"[SUBMIT] submit_frame called with frame shape {frame.shape}", flush=True)
         if not self.running:
+            logging.warning(f"Frame submit rejected: pipeline not running")
             return False
 
         # Rate limiting
         current_time = time.time()
-        if current_time - self.last_process_time < self.frame_interval:
+        time_since_last = current_time - self.last_process_time
+        if time_since_last < self.frame_interval:
             return False  # Skip frame to maintain target FPS
 
         self.last_process_time = current_time
 
+        # Store frame for display
+        frame_copy = frame.copy()
+        self._last_frame = frame_copy
+
         # Process frame in background
         try:
+            self.stats['frames_submitted'] += 1
+            if self.frame_idx % 30 == 0:
+                logging.info(f"Frame {self.frame_idx}: Submitted for processing (total submitted: {self.stats['frames_submitted']})")
             threading.Thread(
                 target=self._process_frame,
-                args=(frame.copy(), timestamp or current_time, self.frame_idx),
+                args=(frame_copy, timestamp or current_time, self.frame_idx),
                 name=f"VisualProcess-{self.frame_idx}",
                 daemon=True
             ).start()
@@ -189,11 +202,24 @@ class VisualPipeline:
 
     def _process_frame(self, frame: np.ndarray, timestamp: float, frame_idx: int):
         """Process a single frame through the visual pipeline."""
+        print(f"[FRAME] Processing frame {frame_idx} start", flush=True)
         start_time = time.time()
 
         try:
             # 1. Person Detection
-            person_detections = self.person_detector.detect(frame)
+            print(f"[FRAME] Frame {frame_idx}: Starting person detection", flush=True)
+            logging.info(f"Frame {frame_idx}: Starting person detection on {frame.shape} frame")
+            start_detect = time.time()
+            try:
+                person_detections = self.person_detector.detect(frame)
+            except Exception as e:
+                logging.error(f"Frame {frame_idx}: detect() FAILED: {e}", exc_info=True)
+                person_detections = []
+            detect_time = time.time() - start_detect
+            print(f"[DETECTION] Frame {frame_idx}: detect() returned {len(person_detections)} persons in {detect_time:.3f}s", flush=True)
+            logging.info(f"Frame {frame_idx}: detect() returned {len(person_detections)} persons in {detect_time:.3f}s")
+            for i, pd in enumerate(person_detections):
+                logging.info(f"  Person {i}: bbox={pd.bbox}, conf={pd.confidence}, area={(pd.bbox[2]-pd.bbox[0])*(pd.bbox[3]-pd.bbox[1])}")
             self.stats['persons_detected'] += len(person_detections)
 
             # Convert to tracker format
@@ -243,7 +269,7 @@ class VisualPipeline:
             self._check_fusion_interrupts()
 
             # 7. Emit VisualData to fusion queue
-            self._emit_visual_data(frame, timestamp, tracked_persons, weapon_associations, weapon_detections)
+            self._emit_visual_data(frame, timestamp, tracked_persons, weapon_associations, weapon_detections, frame_idx)
 
             # Update stats
             processing_time = time.time() - start_time
@@ -290,7 +316,8 @@ class VisualPipeline:
                          timestamp: float,
                          tracked_persons: Dict[int, TrackedPerson],
                          weapon_associations: Dict[int, List],
-                         weapon_detections: List[Tuple]):
+                         weapon_detections: List[Tuple],
+                         frame_idx: int):
         """Emit VisualData to fusion queue."""
         if not self.visual_to_fusion_q:
             return
@@ -310,6 +337,7 @@ class VisualPipeline:
                 })
 
             # Convert weapon detections to core format
+            logging.info(f"Frame {frame_idx}: Weapon detection - found {len(weapon_detections)} weapons")
             weapons = []
             for wx1, wy1, wx2, wy2, wconf, wlabel in weapon_detections:
                 # Find associated person
@@ -338,7 +366,7 @@ class VisualPipeline:
             # Emit to queue (non-blocking)
             self.visual_to_fusion_q.put(visual_data, block=False)
 
-        except Full:
+        except queue.Full:
             logging.warning("Visual-to-fusion queue full, dropping frame")
         except Exception as e:
             logging.error(f"Failed to emit visual data: {e}")

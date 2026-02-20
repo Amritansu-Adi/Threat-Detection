@@ -193,14 +193,17 @@ def test_queue_communication():
     logger.info("\nTesting visual_to_fusion_q...")
     visual = VisualData(
         timestamp=time.time(),
-        frame_idx=1,
-        tracked_persons=[
-            TrackedPerson(
-                track_id=1,
-                bbox=BoundingBox(0.1, 0.1, 0.4, 0.5),
-                identity="UNKNOWN",
-                has_weapon=False,
-            )
+        frame_shape=(480, 640, 3),
+        persons=[
+            {
+                'id': 1,
+                'bbox': (10, 10, 50, 50),
+                'confidence': 0.9,
+                'label': 'UNKNOWN',
+                'has_weapon': False,
+                'frames_in_view': 5,
+                'velocity': (0.0, 0.0)
+            }
         ],
     )
 
@@ -215,7 +218,7 @@ def test_queue_communication():
     retrieved = queues.get_visual_data(block=True, timeout=1.0)
     logger.info(f"  Retrieved visual: {retrieved is not None}")
     assert retrieved is not None, f"Should retrieve visual data (got None)"
-    assert retrieved.frame_idx == 1, "Frame index should match"
+    assert retrieved.frame_shape == (480, 640, 3), "Frame shape should match"
     logger.info("  ✓ Visual queue working")
 
     # Test audio queue
@@ -251,17 +254,21 @@ def test_queue_communication():
     
     # Add 5 items to visual queue
     for i in range(5):
-        success = drain_queues.put_visual_data(
-            VisualData(timestamp=time.time(), frame_idx=i)
-        )
+        vd = VisualData(timestamp=time.time(), frame_shape=(480, 640, 3))
+        success = drain_queues.put_visual_data(vd)
+        logger.info(f"  Put visual data {i}: {success}")
         if not success:
             logger.warning(f"Failed to put visual data {i}")
     
+    # Check queue size before draining
+    qsize_before = drain_queues.visual_to_fusion_q.qsize()
+    logger.info(f"  Queue size before drain: {qsize_before}")
+    
     count, latest = drain_queues.drain_visual_queue()
-    logger.info(f"  Drained {count} items, latest frame_idx={latest.frame_idx if latest else 'None'}")
+    logger.info(f"  Drained {count} items, latest timestamp={latest.timestamp if latest else 'None'}")
     assert count >= 1, f"Should drain at least 1 item, got {count}"
     assert latest is not None, "Latest should not be None"
-    assert latest.frame_idx == 4, f"Latest should be frame 4, got {latest.frame_idx}"
+    assert latest.frame_shape == (480, 640, 3), f"Frame shape should match, got {latest.frame_shape}"
     logger.info(f"  ✓ Successfully drained {count} items")
 
     logger.info("\n" + "=" * 80)

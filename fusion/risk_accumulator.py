@@ -177,16 +177,19 @@ class RiskAccumulator:
         """
         risk = 0.0
 
-        if not visual_data or not visual_data.tracked_persons:
+        if not visual_data or not visual_data.persons:
             return 0.0
 
         # Score each tracked person
-        for person in visual_data.tracked_persons:
-            if person.identity == "UNKNOWN":
+        for person in visual_data.persons:
+            identity = person.get('identity', 'UNKNOWN') if isinstance(person, dict) else person.identity
+            has_weapon = person.get('has_weapon', False) if isinstance(person, dict) else person.has_weapon
+            
+            if identity == "UNKNOWN":
                 risk += self.weights.unknown_person_base
 
                 # Additional risk if unknown person has weapon
-                if person.has_weapon:
+                if has_weapon:
                     risk += self.weights.unknown_with_weapon
 
         # Score weapons
@@ -331,9 +334,9 @@ class RiskAccumulator:
         if visual_risk > 0:
             factors.append(f"Visual: {visual_risk:.1f} pts")
             if visual_data:
-                if any(p.identity == "UNKNOWN" for p in visual_data.tracked_persons):
+                if any(p.get('identity') == "UNKNOWN" for p in visual_data.persons):
                     factors.append("- Unknown person detected")
-                if any(p.has_weapon for p in visual_data.tracked_persons):
+                if any(p.get('has_weapon', False) for p in visual_data.persons):
                     factors.append("- Armed person detected")
                 if visual_data.weapons:
                     factors.append(f"- {len(visual_data.weapons)} weapon(s) detected")

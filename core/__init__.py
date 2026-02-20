@@ -14,6 +14,7 @@ from .data_structures import (
 )
 from .shared_state import SharedStateManager
 from .queue_manager import QueueManager
+from .config_loader import ConfigLoader
 
 __all__ = [
     "TrackedPerson",
@@ -25,4 +26,5 @@ __all__ = [
     "AlertData",
     "SharedStateManager",
     "QueueManager",
+    "ConfigLoader",
 ]

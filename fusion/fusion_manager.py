@@ -176,10 +176,13 @@ class FusionManager:
                 # Step 6: Update shared state (ALL threads see this instantly)
                 self.shared.update_risk(risk_event.score, risk_event.state)
                 if visual_data:
+                    persons = visual_data.persons if visual_data.persons else []
+                    unknown_count = sum(1 for p in persons if (p.get('identity') if isinstance(p, dict) else p.identity) == "UNKNOWN")
+                    weapon_count = sum(1 for p in persons if (p.get('has_weapon', False) if isinstance(p, dict) else p.has_weapon))
                     self.shared.update_visual_summary(
-                        len(visual_data.tracked_persons),
-                        sum(1 for p in visual_data.tracked_persons if p.identity == "UNKNOWN"),
-                        sum(1 for p in visual_data.tracked_persons if p.has_weapon),
+                        len(persons),
+                        unknown_count,
+                        weapon_count,
                         len(visual_data.weapons),
                     )
                 if audio_event:

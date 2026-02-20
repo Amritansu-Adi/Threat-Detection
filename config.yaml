@@ -1,0 +1,29 @@
+# Threat Detection System Configuration
+# This file contains all configurable parameters for the system.
+# Values can be overridden with environment variables (THREAT_SECTION__KEY=value)
+
+system:
+  # Core system settings
+  target_fps: 30.0        # Target visual processing FPS
+  fusion_hz: 1.0          # Fusion manager update frequency (Hz)
+
+visual:
+  # Person detection settings
+  person_model: yolov8n.pt                    # YOLO model for person detection
+  weapon_model: yolov8n.pt                    # YOLO model for weapon detection (fallback)
+  person_conf: 0.30                           # Person detection confidence threshold
+  person_min_area: 2000                       # Minimum person bounding box area (pixels)
+
+  # Processing frequency settings
+  weapon_detect_every_n: 3                    # Run weapon detection every N frames
+  face_recognize_every_n: 10                  # Run face recognition every N frames
+
+audio:
+  # Audio processing settings
+  sample_rate: 16000                          # Audio sample rate (Hz)
+  device: cpu                                 # Processing device (cpu/cuda)
+
+fusion:
+  # Risk calculation settings
+  risk_decay_alpha: 0.95                      # Temporal decay factor (0-1)
+  confidence_beta: 1.0                        # Confidence scaling factor
