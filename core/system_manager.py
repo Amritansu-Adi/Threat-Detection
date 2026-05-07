@@ -170,7 +170,7 @@ class SystemManager:
         logger.info("  [Visual] Creating VisualPipeline...")
         self.visual_pipeline = VisualPipeline(
             person_model_path=visual_config.get("person_model", "yolov8n.pt"),
-            weapon_model_path=visual_config.get("weapon_model", "models/weapon_best.pt"),
+            weapon_model_path=visual_config.get("weapon_model", "camera_detection/models/weapon_best.pt"),
             person_conf=visual_config.get("person_conf", 0.60),
             person_min_area=visual_config.get("person_min_area", 3500),
             target_fps=self.config["system"].get("target_fps", 30.0),
@@ -184,9 +184,15 @@ class SystemManager:
         # Audio Pipeline
         logger.info("  [Audio] Initializing AudioPipeline...")
         audio_config = self.config.get("audio", {})
+        vad_model_path = audio_config.get("vad_model")
+        if vad_model_path and not Path(vad_model_path).exists():
+            logger.warning("Configured VAD model not found at %s; using energy fallback", vad_model_path)
+            vad_model_path = None
         self.audio_pipeline = AudioPipeline(
             queue_manager=self.queue_manager,
+            vad_model_path=vad_model_path,
             device=audio_config.get("device", "cpu"),
+            should_process_audio=lambda: self.shared_state.get_visual_summary().get("persons_count", 0) > 0,
         )
         logger.info("AudioPipeline initialized")
 

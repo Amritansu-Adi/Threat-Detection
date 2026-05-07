@@ -21,10 +21,12 @@ Signal Handling:
 import argparse
 import logging
 import sys
+import os
 from pathlib import Path
 
 # Add current directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent))
+os.environ.setdefault("YOLO_CONFIG_DIR", str(Path(__file__).parent / ".ultralytics"))
 
 from core.system_manager import SystemManager
 
@@ -34,6 +36,7 @@ def setup_logging():
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s | %(name)s | %(levelname)s | %(message)s",
+        force=True,
         handlers=[
             logging.StreamHandler(sys.stdout),
             logging.FileHandler("threat_detection.log")

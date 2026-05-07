@@ -9,7 +9,7 @@ Queue Architecture:
     Fusion Manager → fusion_to_visual_q → Visual Thread
 """
 
-from multiprocessing import Queue
+from queue import Queue
 from typing import Optional, Tuple
 import logging
 
@@ -42,15 +42,15 @@ class QueueManager:
         # Main communication queues
         # Visual queue: 30 FPS rate, store ~3 seconds
         self.visual_to_fusion_q: Queue = Queue(maxsize=max(100, maxsize))
-        logger.info(f"Created visual_to_fusion_q (maxsize={self.visual_to_fusion_q._maxsize})")
+        logger.info(f"Created visual_to_fusion_q (maxsize={self.visual_to_fusion_q.maxsize})")
 
         # Audio queue: ~2 second chunks, store ~10 chunks
         self.audio_to_fusion_q: Queue = Queue(maxsize=max(20, maxsize))
-        logger.info(f"Created audio_to_fusion_q (maxsize={self.audio_to_fusion_q._maxsize})")
+        logger.info(f"Created audio_to_fusion_q (maxsize={self.audio_to_fusion_q.maxsize})")
 
         # Control signal queue: Small, fusion mostly sends on-demand
         self.fusion_to_visual_q: Queue = Queue(maxsize=50)
-        logger.info(f"Created fusion_to_visual_q (maxsize={self.fusion_to_visual_q._maxsize})")
+        logger.info(f"Created fusion_to_visual_q (maxsize={self.fusion_to_visual_q.maxsize})")
 
     def put_visual_data(self, data: VisualData, block: bool = False) -> bool:
         """Put visual data to fusion queue (non-blocking by default).
@@ -209,7 +209,7 @@ class QueueManager:
 
         WARNING: This will drop any pending messages!
         """
-        logger.warning("Clearing all queues - dropping pending messages")
+        logger.debug("Clearing all queues - dropping pending messages")
         self.drain_visual_queue()
         self.drain_audio_queue()
 

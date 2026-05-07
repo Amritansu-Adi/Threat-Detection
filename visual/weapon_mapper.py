@@ -41,16 +41,27 @@ class HandDetector:
         self.mp_hands = None
         
         try:
-            self.mp_hands = mp.solutions.hands.Hands(
-                static_image_mode=static_image_mode,
-                max_num_hands=max_num_hands,
-                min_detection_confidence=min_detection_confidence,
-                min_tracking_confidence=min_tracking_confidence
-            )
-            self.available = True
-        except (AttributeError, Exception) as e:
+            if hasattr(mp, "solutions") and hasattr(mp.solutions, "hands"):
+                self.mp_hands = mp.solutions.hands.Hands(
+                    static_image_mode=static_image_mode,
+                    max_num_hands=max_num_hands,
+                    min_detection_confidence=min_detection_confidence,
+                    min_tracking_confidence=min_tracking_confidence
+                )
+                self.available = True
+            else:
+                logger = logging.getLogger(__name__)
+                logger.info(
+                    "MediaPipe 'solutions.hands' API unavailable in this installation; "
+                    "using heuristic-only weapon association."
+                )
+                self.available = False
+        except Exception as e:
             logger = logging.getLogger(__name__)
-            logger.warning(f"mediapipe hand detection not available: {e} - HandDetector will be stubbed")
+            logger.info(
+                "MediaPipe hand detector disabled (%s); using heuristic-only association.",
+                e,
+            )
             self.available = False
 
     def detect(self, frame: np.ndarray) -> List[HandLandmarks]:
@@ -91,8 +102,10 @@ class WeaponMapper:
         Args:
             overlap_threshold: IOU threshold for high-overlap associations
         """
-        self.overlap_threshold = overlap_threshold
+        self.overlap_threshold = max(0.90, overlap_threshold)
         self.hand_detector = HandDetector()
+        # Unknown-person weapon association requires explicit hand evidence.
+        self.require_hand_for_unknown = True
 
     def map_weapons_to_persons(self,
                               frame: np.ndarray,
@@ -121,8 +134,13 @@ class WeaponMapper:
         for weapon_bbox in weapons:
             wx1, wy1, wx2, wy2, wconf, wlabel = weapon_bbox
             weapon_bbox_coords = (wx1, wy1, wx2, wy2)
-
-            person_id = self._find_weapon_holder(weapon_bbox_coords, persons, hands)
+            hand_person_ids = self._hand_associated_person_ids(weapon_bbox_coords, persons, hands)
+            person_id = self._find_weapon_holder(
+                weapon_bbox_coords,
+                persons,
+                hands,
+                hand_person_ids=hand_person_ids,
+            )
             if person_id is not None:
                 if person_id not in associations:
                     associations[person_id] = []
@@ -133,7 +151,8 @@ class WeaponMapper:
     def _find_weapon_holder(self,
                            weapon_bbox: Tuple[int, int, int, int],
                            persons: List[Dict],
-                           hands: List[HandLandmarks]) -> Optional[int]:
+                           hands: List[HandLandmarks],
+                           hand_person_ids: Optional[List[int]] = None) -> Optional[int]:
         """
         Find which person is holding a weapon using cascading logic.
 
@@ -154,18 +173,13 @@ class WeaponMapper:
         """
         wx1, wy1, wx2, wy2 = weapon_bbox
         wcenter = self._bbox_center(weapon_bbox)
+        hand_person_ids = hand_person_ids or []
 
         # 1. Hand Overlap (highest priority)
-        for hand in hands:
-            for hx, hy in hand.landmarks:
-                if wx1 <= hx <= wx2 and wy1 <= hy <= wy2:
-                    # Check which person's bbox contains this hand point
-                    for person in persons:
-                        px1, py1, px2, py2 = person['bbox']
-                        if px1 <= hx <= px2 and py1 <= hy <= py2:
-                            return person['id']
+        if hand_person_ids:
+            return hand_person_ids[0]
 
-        # 2. High overlap
+        # 2. High overlap (strict)
         best_overlap = 0.0
         best_person_id = None
         w_area = (wx2 - wx1) * (wy2 - wy1)
@@ -177,6 +191,10 @@ class WeaponMapper:
             overlap_ratio = inter_area / float(w_area) if w_area > 0 else 0
 
             if overlap_ratio > best_overlap:
+                # Unknown identities require explicit hand evidence.
+                name = str(person.get("name", "")).upper()
+                if self.require_hand_for_unknown and name in ("", "UNKNOWN"):
+                    continue
                 best_overlap = overlap_ratio
                 best_person_id = person['id']
 
@@ -187,6 +205,12 @@ class WeaponMapper:
         for person in persons:
             x1, y1, x2, y2 = person['bbox']
             if x1 <= wcenter[0] <= x2 and y1 <= wcenter[1] <= y2:
+                name = str(person.get("name", "")).upper()
+                if self.require_hand_for_unknown and name in ("", "UNKNOWN"):
+                    continue
+                # Require decent overlap even when center is inside to avoid loose attachments.
+                if self._calculate_iou(weapon_bbox, person['bbox']) < 0.12:
+                    continue
                 return person['id']
 
         # 4. Best IOU
@@ -194,29 +218,71 @@ class WeaponMapper:
             best_iou = 0.0
             best_person_id_iou = None
             for person in persons:
+                name = str(person.get("name", "")).upper()
+                if self.require_hand_for_unknown and name in ("", "UNKNOWN"):
+                    continue
                 iou = self._calculate_iou(weapon_bbox, person['bbox'])
                 if iou > best_iou:
                     best_iou = iou
                     best_person_id_iou = person['id']
 
-            if best_iou > 0.05:
+            if best_iou > 0.12:
                 return best_person_id_iou
 
         # 5. Nearest person by centroid (with distance threshold)
         if persons:
             min_dist = float('inf')
             nearest_person_id = None
-            max_association_dist = 50  # Maximum pixel distance for association
             
             for person in persons:
+                px1, py1, px2, py2 = person['bbox']
+                name = str(person.get("name", "")).upper()
+                if self.require_hand_for_unknown and name in ("", "UNKNOWN"):
+                    continue
                 pc = self._bbox_center(person['bbox'])
                 dist = ((pc[0] - wcenter[0])**2 + (pc[1] - wcenter[1])**2)**0.5
+                diag = ((px2 - px1) ** 2 + (py2 - py1) ** 2) ** 0.5
+                max_association_dist = min(120.0, max(45.0, 0.5 * diag))
                 if dist < min_dist and dist <= max_association_dist:
                     min_dist = dist
                     nearest_person_id = person['id']
-            return nearest_person_id
+            if nearest_person_id is not None and min_dist <= 60.0:
+                return nearest_person_id
+
+            # Single-person fallback: if exactly one person exists and weapon is
+            # close to their bbox edge, treat it as associated rather than dropping.
+            if len(persons) == 1:
+                px1, py1, px2, py2 = persons[0]['bbox']
+                name = str(persons[0].get("name", "")).upper()
+                if self.require_hand_for_unknown and name in ("", "UNKNOWN"):
+                    return None
+                dx = max(px1 - wcenter[0], 0, wcenter[0] - px2)
+                dy = max(py1 - wcenter[1], 0, wcenter[1] - py2)
+                edge_distance = (dx ** 2 + dy ** 2) ** 0.5
+                if edge_distance <= 12:
+                    return persons[0]['id']
 
         return None
+
+    @staticmethod
+    def _hand_associated_person_ids(
+        weapon_bbox: Tuple[int, int, int, int],
+        persons: List[Dict],
+        hands: List[HandLandmarks],
+    ) -> List[int]:
+        """Return person IDs that have at least one hand landmark inside weapon box."""
+        wx1, wy1, wx2, wy2 = weapon_bbox
+        hits: Dict[int, int] = {}
+        for hand in hands:
+            for hx, hy in hand.landmarks:
+                if not (wx1 <= hx <= wx2 and wy1 <= hy <= wy2):
+                    continue
+                for person in persons:
+                    px1, py1, px2, py2 = person["bbox"]
+                    if px1 <= hx <= px2 and py1 <= hy <= py2:
+                        pid = int(person["id"])
+                        hits[pid] = hits.get(pid, 0) + 1
+        return [pid for pid, _ in sorted(hits.items(), key=lambda item: item[1], reverse=True)]
 
     def get_unassociated_weapons(self,
                                 weapons: List[Tuple[int, int, int, int, float, str]],

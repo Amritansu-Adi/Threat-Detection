@@ -10,7 +10,7 @@ Uses multiprocessing.Manager() instead of threading locks because:
 3. Atomic dict operations (single-writer assumption on fusion manager)
 """
 
-from multiprocessing import Manager
+from threading import RLock
 from typing import Any, Dict, Optional
 import logging
 from datetime import datetime
@@ -35,9 +35,10 @@ class SharedStateManager:
     """
 
     def __init__(self):
-        """Initialize shared state using multiprocessing.Manager()."""
-        self.manager = Manager()
-        self._state = self.manager.dict()
+        """Initialize shared state using an in-process lock-protected dict."""
+        self.manager = None
+        self._lock = RLock()
+        self._state = {}
 
         # Initialize all keys
         self._state["risk_score"] = 0.0
@@ -50,7 +51,13 @@ class SharedStateManager:
         self._state["visual_persons_count"] = 0
         self._state["visual_unknown_count"] = 0
         self._state["visual_armed_count"] = 0
+        self._state["visual_unknown_with_weapon"] = False
         self._state["weapons_detected_count"] = 0
+
+        # Risk explanation
+        self._state["risk_visual_component"] = 0.0
+        self._state["risk_audio_component"] = 0.0
+        self._state["risk_contributing_factors"] = []
 
         # Audio data
         self._state["audio_transcript"] = ""
@@ -72,18 +79,26 @@ class SharedStateManager:
 
     def close(self):
         """Shutdown the manager (should be called at system exit)."""
-        if self.manager:
-            self.manager.shutdown()
-            logger.info("SharedStateManager closed")
+        logger.info("SharedStateManager closed")
 
     # === Risk Score & State Management ===
 
-    def update_risk(self, score: float, state: RiskState) -> None:
+    def update_risk(
+        self,
+        score: float,
+        state: RiskState,
+        visual_risk: float = 0.0,
+        audio_risk: float = 0.0,
+        contributing_factors: Optional[list] = None,
+    ) -> None:
         """Update risk score and state.
 
         Args:
             score: Risk score (0-100)
             state: RiskState enum value
+            visual_risk: Visual component score for explainability
+            audio_risk: Audio component score for explainability
+            contributing_factors: Human-readable evidence summary
         """
         if not 0 <= score <= 100:
             logger.warning(f"Risk score {score} out of range [0, 100]")
@@ -97,6 +112,9 @@ class SharedStateManager:
 
         self._state["risk_score"] = score
         self._state["state"] = state.value
+        self._state["risk_visual_component"] = float(visual_risk)
+        self._state["risk_audio_component"] = float(audio_risk)
+        self._state["risk_contributing_factors"] = list(contributing_factors or [])
         self._state["last_update_timestamp"] = datetime.now().timestamp()
 
     def get_risk(self) -> float:
@@ -134,6 +152,7 @@ class SharedStateManager:
         unknown_count: int,
         armed_count: int,
         weapons_count: int,
+        unknown_with_weapon: bool = False,
     ) -> None:
         """Update visual detection summary.
 
@@ -142,11 +161,13 @@ class SharedStateManager:
             unknown_count: Persons with unknown identity
             armed_count: Persons associated with weapons
             weapons_count: Total weapons detected
+            unknown_with_weapon: True if an unknown person is associated with a weapon
         """
         self._state["visual_persons_count"] = persons_count
         self._state["visual_unknown_count"] = unknown_count
         self._state["visual_armed_count"] = armed_count
         self._state["weapons_detected_count"] = weapons_count
+        self._state["visual_unknown_with_weapon"] = bool(unknown_with_weapon)
 
     def get_visual_summary(self) -> Dict[str, int]:
         """Get visual detection summary.
@@ -159,6 +180,15 @@ class SharedStateManager:
             "unknown_count": int(self._state["visual_unknown_count"]),
             "armed_count": int(self._state["visual_armed_count"]),
             "weapons_count": int(self._state["weapons_detected_count"]),
+            "unknown_with_weapon": bool(self._state["visual_unknown_with_weapon"]),
+        }
+
+    def get_risk_details(self) -> Dict[str, Any]:
+        """Get current risk component scores and explanations."""
+        return {
+            "visual_risk": float(self._state["risk_visual_component"]),
+            "audio_risk": float(self._state["risk_audio_component"]),
+            "contributing_factors": list(self._state["risk_contributing_factors"]),
         }
 
     # === Audio Data Access ===
@@ -263,7 +293,8 @@ class SharedStateManager:
             error_msg: Error description
         """
         self._state["error_message"] = error_msg
-        logger.error(f"System error: {error_msg}")
+        if error_msg:
+            logger.error(f"System error: {error_msg}")
 
     def get_error(self) -> str:
         """Get current error message.
@@ -289,7 +320,7 @@ class SharedStateManager:
 
     def reset(self) -> None:
         """Reset to initial state (for testing or system reset)."""
-        logger.warning("Resetting shared state")
+        logger.debug("Resetting shared state")
         self.update_risk(0.0, RiskState.IDLE)
         self.update_visual_summary(0, 0, 0, 0)
         self.update_audio_summary("", "neutral", 0.0, "neutral", 0.0)

@@ -42,17 +42,26 @@ class RiskWeights:
     """
 
     # Visual threat weights
-    unknown_person_base: float = 20.0  # Unknown person in scene
-    weapon_base: float = 40.0  # Weapon detected (not held)
-    unknown_with_weapon: float = 40.0  # Additional points if unknown person has weapon
+    unknown_person_base: float = 8.0  # Unknown person in scene after grace period
+    weapon_base: float = 6.0  # Unassociated weapon/object risk
+    associated_weapon_base: float = 26.0  # Weapon associated with a person
+    authorized_with_weapon: float = 3.0  # Known resident holding a plausible weapon/tool
+    unknown_with_weapon: float = 26.0  # Additional points if unknown person has weapon
+    unknown_grace_frames: int = 15  # Allow identity recognition before scoring unknowns
+    max_unknown_person_risk: float = 20.0
     
     # Audio emotion weights (Stage 2: DistilHuBERT)
-    anger_high_conf: float = 25.0  # High confidence anger
-    fear_high_conf: float = 30.0  # High confidence fear
+    anger_high_conf: float = 15.0  # High confidence anger
+    fear_high_conf: float = 20.0  # High confidence fear
     
     # Audio intent weights (Stage 3: DistilBERT zero-shot)
-    distress_intent: float = 35.0  # Distress call ("help!", "fire!")
-    threat_intent: float = 45.0  # Threat statement ("I'll kill you")
+    distress_intent: float = 45.0  # Distress call ("help!", "fire!")
+    threat_intent: float = 55.0  # Threat statement ("I'll kill you")
+    sudden_sound_anomaly: float = 24.0  # Sudden transient/noise anomaly
+    audio_visual_unknown_bonus: float = 12.0
+    audio_visual_weapon_bonus: float = 22.0
+    visual_weight: float = 0.55
+    audio_weight: float = 0.45
     
     # Confidence thresholds
     emotion_confidence_threshold: float = 0.80  # Only strong emotions trigger
@@ -128,9 +137,16 @@ class RiskAccumulator:
             audio_risk, audio_event, visual_data
         )
 
-        # Combine risks: temporal persistence + new input
-        new_input_risk = visual_risk + audio_risk
-        total_risk = (decayed_risk * self.alpha) + (new_input_risk * self.beta)
+        # Weighted-sum scoring model:
+        # total = decayed_previous + (wv*visual + wa*audio + cross_modal_bonus) * dt_scale
+        cross_modal_bonus = self._cross_modal_bonus(visual_data, audio_event, audio_risk)
+        weighted_input = (
+            self.weights.visual_weight * visual_risk
+            + self.weights.audio_weight * audio_risk
+            + cross_modal_bonus
+        )
+        evidence_scale = max(0.20, min(1.0, dt_seconds))
+        total_risk = decayed_risk + (weighted_input * self.beta * evidence_scale)
 
         # Clamp to [0, 100]
         total_risk = max(0.0, min(100.0, total_risk))
@@ -164,10 +180,11 @@ class RiskAccumulator:
     def _calculate_visual_risk(self, visual_data: VisualData) -> float:
         """Calculate risk from visual detections.
 
-        Scoring:
-        - Unknown person: +20 pts
-        - Each weapon: +40 pts
-        - Unknown with weapon: +40 additional pts
+        Scoring emphasizes combinations:
+        - Unknown person alone is low risk after a grace period.
+        - Unassociated weapon-like objects are low risk.
+        - Weapon associated with a person is moderate/high depending identity.
+        - Unknown person with associated weapon is high risk.
 
         Args:
             visual_data: Visual detection data
@@ -177,28 +194,50 @@ class RiskAccumulator:
         """
         risk = 0.0
 
-        if not visual_data or not visual_data.persons:
+        if not visual_data:
             return 0.0
+        persons = self._get_visual_persons(visual_data)
+        if not persons:
+            return self._calculate_unassociated_weapon_risk(visual_data.weapons)
+
+        associated_weapon_ids = {
+            weapon.associated_person_id
+            for weapon in visual_data.weapons
+            if weapon.associated_person_id is not None
+        }
+        unknown_person_risk = 0.0
 
         # Score each tracked person
-        for person in visual_data.persons:
-            identity = person.get('identity', 'UNKNOWN') if isinstance(person, dict) else person.identity
-            has_weapon = person.get('has_weapon', False) if isinstance(person, dict) else person.has_weapon
-            
-            if identity == "UNKNOWN":
-                risk += self.weights.unknown_person_base
+        for person in persons:
+            identity = self._person_identity(person)
+            has_weapon = self._person_has_weapon(person)
+            person_id = self._person_id(person)
+            frames_in_view = self._person_frames_in_view(person)
+            is_unknown = self._is_unknown_identity(identity)
+            person_has_associated_weapon = has_weapon or person_id in associated_weapon_ids
 
-                # Additional risk if unknown person has weapon
-                if has_weapon:
-                    risk += self.weights.unknown_with_weapon
+            if is_unknown and frames_in_view >= self.weights.unknown_grace_frames:
+                unknown_person_risk += self.weights.unknown_person_base
 
-        # Score weapons
-        if visual_data.weapons:
-            for weapon in visual_data.weapons:
-                if weapon.associated_person_id is None:
-                    # Unassociated weapon (dropped, etc.) adds risk
-                    risk += self.weights.weapon_base * 0.5
+            if person_has_associated_weapon:
+                if is_unknown:
+                    risk += self.weights.associated_weapon_base + self.weights.unknown_with_weapon
+                else:
+                    risk += self.weights.authorized_with_weapon
 
+        risk += min(unknown_person_risk, self.weights.max_unknown_person_risk)
+
+        risk += self._calculate_unassociated_weapon_risk(visual_data.weapons)
+
+        return risk
+
+    def _calculate_unassociated_weapon_risk(self, weapons: List[WeaponDetection]) -> float:
+        """Score weapon-like detections that are not tied to a visible person."""
+        risk = 0.0
+        for weapon in weapons or []:
+            if weapon.associated_person_id is None:
+                # Unassociated weapon-like detections are weak evidence.
+                risk += self.weights.weapon_base * max(0.1, weapon.confidence)
         return risk
 
     def _calculate_audio_risk(self, audio_event: AudioEvent) -> float:
@@ -220,21 +259,62 @@ class RiskAccumulator:
         if not audio_event:
             return 0.0
 
+        if audio_event.vad_confidence < 0.5:
+            return 0.0
+
         # Stage 2: Emotion-based risk (requires high confidence)
         if audio_event.emotion_confidence >= self.weights.emotion_confidence_threshold:
             if audio_event.emotion == EmotionType.ANGRY:
-                risk += self.weights.anger_high_conf
+                risk += self.weights.anger_high_conf * audio_event.emotion_confidence
             elif audio_event.emotion == EmotionType.FEARFUL:
-                risk += self.weights.fear_high_conf
+                risk += self.weights.fear_high_conf * audio_event.emotion_confidence
 
         # Stage 3: Intent-based risk (requires high confidence)
         if audio_event.intent_confidence >= self.weights.intent_confidence_threshold:
             if audio_event.intent == IntentType.THREAT:
-                risk += self.weights.threat_intent
+                risk += self.weights.threat_intent * audio_event.intent_confidence
             elif audio_event.intent == IntentType.DISTRESS:
-                risk += self.weights.distress_intent
+                risk += self.weights.distress_intent * audio_event.intent_confidence
+
+        # Stage 4: Sudden acoustic anomaly (bang/crash-like transient).
+        features = audio_event.raw_audio_features or {}
+        anomaly_score = float(features.get("anomaly_score", 0.0))
+        sudden_anomaly = bool(features.get("sudden_anomaly", False))
+        if sudden_anomaly:
+            risk += self.weights.sudden_sound_anomaly * max(0.35, anomaly_score)
 
         return risk
+
+    def _cross_modal_bonus(
+        self,
+        visual_data: Optional[VisualData],
+        audio_event: Optional[AudioEvent],
+        audio_risk: float,
+    ) -> float:
+        """Cross-modal bonus on top of weighted visual/audio components."""
+        bonus = 0.0
+        if audio_risk <= 0 or not audio_event or not visual_data:
+            return 0.0
+
+        if audio_event.intent not in (IntentType.THREAT, IntentType.DISTRESS):
+            return 0.0
+
+        persons = self._get_visual_persons(visual_data)
+        unknown_present = any(
+            self._is_unknown_identity(self._person_identity(p))
+            for p in persons
+        )
+        weapon_present = bool(visual_data.weapons) or any(
+            self._person_has_weapon(p)
+            for p in persons
+        )
+
+        if unknown_present:
+            bonus += self.weights.audio_visual_unknown_bonus
+        if weapon_present:
+            bonus += self.weights.audio_visual_weapon_bonus
+
+        return bonus
 
     def _apply_context_filtering(
         self,
@@ -296,16 +376,54 @@ class RiskAccumulator:
         Returns:
             RiskState: Corresponding state
         """
-        if risk_score < 25:
+        if risk_score < 20:
             return RiskState.IDLE
-        elif risk_score < 50:
+        elif risk_score < 45:
             return RiskState.CAUTION
-        elif risk_score < 75:
+        elif risk_score < 70:
             return RiskState.EVALUATING
         elif risk_score < 90:
             return RiskState.ALERT
         else:
             return RiskState.CRITICAL
+
+    @staticmethod
+    def _is_unknown_identity(identity: Optional[str]) -> bool:
+        normalized = str(identity or "").strip().upper()
+        return normalized in {"", "UNKNOWN", "UNKNOWN_ENTITY", "UNRECOGNIZED", "NONE"}
+
+    @staticmethod
+    def _get_visual_persons(visual_data: Optional[VisualData]) -> List:
+        if not visual_data:
+            return []
+        tracked = getattr(visual_data, 'tracked_persons', None)
+        if tracked:
+            return list(tracked)
+        return list(visual_data.persons or [])
+
+    @staticmethod
+    def _person_identity(person) -> Optional[str]:
+        if isinstance(person, dict):
+            return person.get('identity') or person.get('label') or person.get('name') or "UNKNOWN"
+        return getattr(person, 'identity', None) or getattr(person, 'label', None) or "UNKNOWN"
+
+    @staticmethod
+    def _person_has_weapon(person) -> bool:
+        if isinstance(person, dict):
+            return bool(person.get('has_weapon', False))
+        return bool(getattr(person, 'has_weapon', False))
+
+    @staticmethod
+    def _person_id(person):
+        if isinstance(person, dict):
+            return person.get('id', person.get('track_id'))
+        return getattr(person, 'id', getattr(person, 'track_id', None))
+
+    @staticmethod
+    def _person_frames_in_view(person) -> int:
+        if isinstance(person, dict):
+            return int(person.get('frames_in_view', 0))
+        return int(getattr(person, 'frames_in_view', 999))
 
     def _build_contributing_factors(
         self,
@@ -334,12 +452,29 @@ class RiskAccumulator:
         if visual_risk > 0:
             factors.append(f"Visual: {visual_risk:.1f} pts")
             if visual_data:
-                if any(p.get('identity') == "UNKNOWN" for p in visual_data.persons):
+                persons = self._get_visual_persons(visual_data)
+                if any(self._is_unknown_identity(self._person_identity(p)) for p in persons):
                     factors.append("- Unknown person detected")
-                if any(p.get('has_weapon', False) for p in visual_data.persons):
+                armed_persons = [p for p in persons if self._person_has_weapon(p)]
+                unknown_armed = [
+                    p
+                    for p in armed_persons
+                    if self._is_unknown_identity(self._person_identity(p))
+                ]
+                known_armed = len(armed_persons) - len(unknown_armed)
+                if unknown_armed:
+                    factors.append(f"- Unknown person with associated weapon ({len(unknown_armed)})")
+                if known_armed:
+                    factors.append(f"- Known person with associated object/tool ({known_armed})")
+                elif armed_persons:
                     factors.append("- Armed person detected")
                 if visual_data.weapons:
                     factors.append(f"- {len(visual_data.weapons)} weapon(s) detected")
+                    unassociated = sum(
+                        1 for w in visual_data.weapons if w.associated_person_id is None
+                    )
+                    if unassociated:
+                        factors.append(f"- Unassociated weapon-like object ({unassociated})")
 
         if audio_risk > 0:
             factors.append(f"Audio: {audio_risk:.1f} pts")
@@ -350,6 +485,9 @@ class RiskAccumulator:
                     )
                 if audio_event.intent_confidence > 0.75:
                     factors.append(f"- {audio_event.intent.value.upper()} intent detected")
+                if bool((audio_event.raw_audio_features or {}).get("sudden_anomaly", False)):
+                    score = float((audio_event.raw_audio_features or {}).get("anomaly_score", 0.0))
+                    factors.append(f"- Sudden sound anomaly ({score:.2f})")
 
         if decay_factor < 0.95:
             factors.append(f"Temporal decay applied ({decay_factor:.3f})")

@@ -50,11 +50,13 @@ class SileroVAD:
         self.model_path = model_path
         self.session = None
         self.input_name = None
+        self._input_names = set()
+        self.energy_threshold = 0.008
 
         if model_path:
             self._load_model(model_path)
         else:
-            logger.warning("No model path provided - VAD will be stubbed in offline mode")
+            logger.warning("No model path provided - VAD will use energy fallback")
 
     def _load_model(self, model_path: str) -> None:
         """Load ONNX model for inference.
@@ -68,13 +70,14 @@ class SileroVAD:
                 model_path,
                 providers=["CPUExecutionProvider"],  # CPU only (GPU optional)
             )
+            self._input_names = {i.name for i in self.session.get_inputs()}
             self.input_name = self.session.get_inputs()[0].name
             logger.info(
                 f"✓ Silero VAD loaded: {model_path} "
                 f"(window={self.WINDOW_SIZE}, sr={self.SAMPLE_RATE}Hz)"
             )
         except Exception as e:
-            logger.error(f"Failed to load Silero VAD model: {e}")
+            logger.warning(f"Failed to load Silero VAD model; using energy fallback: {e}")
             self.session = None
 
     def process_chunk(
@@ -94,9 +97,27 @@ class SileroVAD:
                 - updated_state: State dict for next chunk
         """
         if self.session is None:
-            # Stub mode: return low confidence if no model
-            logger.debug("VAD in stub mode (no ONNX model loaded)")
-            return 0.0, session_state
+            audio_chunk = np.asarray(audio_chunk, dtype=np.float32)
+            if audio_chunk.ndim > 1:
+                audio_chunk = audio_chunk.squeeze()
+
+            if audio_chunk.size == 0:
+                return 0.0, session_state
+
+            rms = float(np.sqrt(np.mean(np.square(audio_chunk))))
+            peak = float(np.max(np.abs(audio_chunk)))
+            if peak > 1.0:
+                rms /= peak
+
+            if audio_chunk.size > 1:
+                zcr = float(np.mean(np.abs(np.diff(np.signbit(audio_chunk)))))
+            else:
+                zcr = 0.0
+
+            energy_score = rms / max(self.energy_threshold, 1e-6)
+            speech_shape_score = zcr / 0.06
+            confidence = min(1.0, energy_score, speech_shape_score)
+            return confidence, session_state
 
         try:
             # Ensure audio is correct format
@@ -113,25 +134,49 @@ class SileroVAD:
                     (0, self.WINDOW_SIZE - len(audio_chunk)),
                     mode="constant",
                 )
+            elif "state" in self._input_names and len(audio_chunk) != self.WINDOW_SIZE:
+                # Newer Silero VAD stateful ONNX expects fixed 512-sample windows.
+                audio_chunk = audio_chunk[-self.WINDOW_SIZE:]
 
             # Normalize audio to [-1, 1]
             max_val = np.max(np.abs(audio_chunk))
             if max_val > 0:
                 audio_chunk = audio_chunk / max_val
 
-            # Run inference
-            # Silero VAD inputs: [audio_chunk, session_state_h, session_state_c]
-            ort_inputs = {
-                self.input_name: audio_chunk,
-                "h": np.zeros((2, 1, 64), dtype=np.float32),  # Default if no state
-                "c": np.zeros((2, 1, 64), dtype=np.float32),
-            }
+            # Build model-specific inputs. Two common variants exist:
+            # 1) input + h + c
+            # 2) input + state + sr
+            ort_inputs = {}
+            model_input_name = "input" if "input" in self._input_names else self.input_name
+            # Newer Silero ONNX expects 2D [batch, samples].
+            ort_inputs[model_input_name] = audio_chunk.reshape(1, -1).astype(np.float32)
+
+            if "state" in self._input_names:
+                state = session_state.get("state")
+                if state is None or not isinstance(state, np.ndarray) or state.shape[0] != 2:
+                    state = np.zeros((2, 1, 128), dtype=np.float32)
+                ort_inputs["state"] = state.astype(np.float32)
+            if "sr" in self._input_names:
+                ort_inputs["sr"] = np.array(self.SAMPLE_RATE, dtype=np.int64)
+            if "h" in self._input_names:
+                ort_inputs["h"] = session_state.get("h", np.zeros((2, 1, 64), dtype=np.float32))
+            if "c" in self._input_names:
+                ort_inputs["c"] = session_state.get("c", np.zeros((2, 1, 64), dtype=np.float32))
 
             ort_outs = self.session.run(None, ort_inputs)
-            confidence = float(ort_outs[0][0][0])  # VAD output probability
+            confidence = float(np.asarray(ort_outs[0]).reshape(-1)[0])  # VAD output probability
 
-            # Update state for next chunk
-            new_state = {"h": ort_outs[1], "c": ort_outs[2]}
+            # Update state for next chunk (support both model variants).
+            new_state = dict(session_state)
+            output_names = [o.name for o in self.session.get_outputs()]
+            if "stateN" in output_names:
+                state_idx = output_names.index("stateN")
+                new_state["state"] = ort_outs[state_idx]
+            else:
+                if len(ort_outs) > 1:
+                    new_state["h"] = ort_outs[1]
+                if len(ort_outs) > 2:
+                    new_state["c"] = ort_outs[2]
 
             return confidence, new_state
 

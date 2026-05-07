@@ -14,11 +14,11 @@ system:
 
 visual:
   person_model: yolov8n.pt
-  weapon_model: models/weapon_best.pt
+  weapon_model: camera_detection/models/weapon_best.pt
   person_conf: 0.60
   person_min_area: 3500
   weapon_detect_every_n: 3
-  face_recognize_every_n: 10
+  face_recognize_every_n: 30
 
 audio:
   sample_rate: 16000
@@ -57,15 +57,16 @@ class ConfigLoader:
         },
         "visual": {
             "person_model": "yolov8n.pt",
-            "weapon_model": "models/weapon_best.pt",
+            "weapon_model": "camera_detection/models/weapon_best.pt",
             "person_conf": 0.60,
             "person_min_area": 3500,
             "weapon_detect_every_n": 3,
-            "face_recognize_every_n": 10,
+            "face_recognize_every_n": 30,
         },
         "audio": {
             "sample_rate": 16000,
             "device": "cpu",
+            "vad_model": "models/silero_vad.onnx",
         },
         "fusion": {
             "risk_decay_alpha": 0.95,

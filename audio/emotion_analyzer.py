@@ -21,6 +21,8 @@ Paper: DistilHuBERT: Speech Representation Learning by Layer-wise Distillation
 """
 
 import logging
+import os
+import re
 from typing import Tuple, Optional, Dict
 import numpy as np
 from enum import Enum
@@ -28,10 +30,10 @@ from enum import Enum
 try:
     from transformers import pipeline
     HAS_TRANSFORMERS = True
-except ImportError:
+except Exception as e:
     HAS_TRANSFORMERS = False
     logger = logging.getLogger(__name__)
-    logger.warning("transformers not installed - EmotionAnalyzer will be stubbed")
+    logger.warning(f"transformers unavailable - EmotionAnalyzer will be stubbed: {e}")
 
 logger = logging.getLogger(__name__)
 
@@ -58,7 +60,8 @@ class EmotionAnalyzer:
         pipeline: Transformers pipeline for inference
     """
 
-    MODEL_NAME = "ntu-spml/distilhubert"  # 0.02MB model (distilled)
+    # Use a speech-emotion model with classification head.
+    MODEL_NAME = "Dpngtm/wav2vec2-emotion-recognition"
     DEFAULT_EMOTIONS = [
         "neutral", "happy", "sad", "angry", "fearful", "disgust", "surprise"
     ]
@@ -74,6 +77,7 @@ class EmotionAnalyzer:
         self.use_fast = use_fast
         self.pipeline = None
         self.loaded = False
+        self._id2label: Dict[int, str] = {}
 
         if HAS_TRANSFORMERS:
             self._load_model()
@@ -88,9 +92,18 @@ class EmotionAnalyzer:
                 task="audio-classification",
                 model=self.MODEL_NAME,
                 device=0 if self.device == "cuda" else -1,  # -1 for CPU
+                local_files_only=(os.getenv("THREAT_TRANSFORMER_LOCAL_ONLY", "1") == "1"),
             )
+            try:
+                model_cfg = getattr(self.pipeline, "model", None).config
+                self._id2label = {
+                    int(k): str(v).lower()
+                    for k, v in getattr(model_cfg, "id2label", {}).items()
+                }
+            except Exception:
+                self._id2label = {}
             self.loaded = True
-            logger.info(f"✓ DistilHuBERT loaded: {self.MODEL_NAME} (0.02MB model)")
+            logger.info(f"✓ Emotion model loaded: {self.MODEL_NAME}")
         except Exception as e:
             logger.error(f"Failed to load DistilHuBERT: {e}")
             self.loaded = False
@@ -136,7 +149,7 @@ class EmotionAnalyzer:
 
             # Extract top result
             top = result[0]
-            emotion_str = top["label"].lower()
+            emotion_str = self._normalize_label(str(top["label"]))
             confidence = float(top["score"])
 
             # Map to Emotion enum
@@ -152,6 +165,41 @@ class EmotionAnalyzer:
         except Exception as e:
             logger.error(f"Error in emotion analysis: {e}")
             return Emotion.NEUTRAL, 0.0
+
+    def _normalize_label(self, raw_label: str) -> str:
+        """Map model labels to canonical emotion labels."""
+        label = raw_label.strip().lower()
+        alias_map = {
+            "anger": "angry",
+            "fear": "fearful",
+            "happiness": "happy",
+            "sadness": "sad",
+            "calm": "neutral",
+            "surprised": "surprise",
+        }
+        if label in alias_map:
+            return alias_map[label]
+
+        match = re.match(r"label[_\s-]*(\d+)$", label, flags=re.IGNORECASE)
+        if match:
+            idx = int(match.group(1))
+            mapped = self._id2label.get(idx, "").strip().lower()
+            if mapped:
+                if mapped in alias_map:
+                    return alias_map[mapped]
+                return mapped
+            fallback_by_index = {
+                0: "sad",
+                1: "angry",
+                2: "disgust",
+                3: "fearful",
+                4: "happy",
+                5: "neutral",
+                6: "surprise",
+            }
+            return fallback_by_index.get(idx, "neutral")
+
+        return label
 
     def get_top_emotions(
         self, audio_array: np.ndarray, sample_rate: int = 16000, top_k: int = 3

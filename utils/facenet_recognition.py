@@ -10,7 +10,8 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 BASE_DIR = os.path.dirname(SCRIPT_DIR)
 EMBEDDINGS_PATH = os.path.join(BASE_DIR, 'face_embeddings.npz')
 UNKNOWN_THRESHOLD = 0.9
-HOMEOWNER_THRESHOLD = 1.1 # More lenient threshold for homeowners
+HOMEOWNER_THRESHOLD = 1.00  # More lenient for homeowner
+MIN_MARGIN_TO_SECOND_BEST = 0.04
 
 # --- Global State for Face Data ---
 known_face_embeddings = []
@@ -63,13 +64,16 @@ def recognize_face(face_img_bgr, mtcnn_model, resnet_model, device):
             if not distances:
                 return None, float('inf')
 
-            min_dist = min(distances)
-            min_idx = np.argmin(distances)
+            sorted_indices = np.argsort(distances)
+            min_idx = int(sorted_indices[0])
+            min_dist = float(distances[min_idx])
+            second_best = float(distances[int(sorted_indices[1])]) if len(sorted_indices) > 1 else float("inf")
             
             recognized_name = known_face_names[min_idx]
             threshold = HOMEOWNER_THRESHOLD if recognized_name.lower() == 'homeowner' else UNKNOWN_THRESHOLD
 
-            if min_dist < threshold:
+            margin_ok = (second_best - min_dist) >= MIN_MARGIN_TO_SECOND_BEST
+            if min_dist < threshold and margin_ok:
                 return recognized_name, min_dist
             else:
                 return None, min_dist

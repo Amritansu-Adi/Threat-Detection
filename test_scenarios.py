@@ -55,10 +55,13 @@ class TestScenarioArmedUnknownPerson:
 
         event = ra.calculate_risk(0.0, visual, None, dt_seconds=1.0)
 
-        # Risk = unknown(20) + weapon(40) = 60 pts
-        expected_risk = 60.0
+        expected_risk = (
+            ra.weights.unknown_person_base
+            + ra.weights.associated_weapon_base
+            + ra.weights.unknown_with_weapon
+        )
         assert pytest.approx(event.score, rel=0.1) == expected_risk
-        assert event.state == RiskState.EVALUATING
+        assert event.state == RiskState.ALERT
         assert "Unknown person" in " ".join(event.contributing_factors)
         assert "Armed" in " ".join(event.contributing_factors)
 
@@ -81,8 +84,10 @@ class TestScenarioDistressCall:
 
         event = ra.calculate_risk(0.0, None, audio, dt_seconds=1.0)
 
-        # Risk = fear(30) + distress(35) = 65 pts
-        expected_risk = 65.0
+        expected_risk = (
+            ra.weights.fear_high_conf * audio.emotion_confidence
+            + ra.weights.distress_intent * audio.intent_confidence
+        )
         assert pytest.approx(event.score, rel=0.1) == expected_risk
         assert event.state == RiskState.EVALUATING
         factors_str = " ".join(event.contributing_factors).lower()
@@ -108,8 +113,10 @@ class TestScenarioThreatSpeech:
 
         event = ra.calculate_risk(0.0, None, audio, dt_seconds=1.0)
 
-        # Risk = anger(25) + threat(45) = 70 pts
-        expected_risk = 70.0
+        expected_risk = (
+            ra.weights.anger_high_conf * audio.emotion_confidence
+            + ra.weights.threat_intent * audio.intent_confidence
+        )
         assert pytest.approx(event.score, rel=0.1) == expected_risk
         assert event.state == RiskState.EVALUATING
         assert "THREAT" in " ".join(event.contributing_factors)
@@ -177,10 +184,10 @@ class TestScenarioCompoundThreat:
             intent_confidence=0.9,
         )
 
-        # Compound risk = visual(60) + audio(70) = 130, clamped to 100
+        # Compound unknown + weapon + hostile audio should be critical.
         event = ra.calculate_risk(0.0, visual, audio, dt_seconds=1.0)
         assert event.score > 90  # Should be very high
-        assert event.state in [RiskState.ALERT, RiskState.CRITICAL]
+        assert event.state == RiskState.CRITICAL
 
 
 class TestScenarioStateMachineAlertTiming:
@@ -219,10 +226,10 @@ class TestScenarioStateMachineAlertTiming:
 
 
 class TestScenarioRiskEscalation:
-    """Scenario 7: Risk builds over time with repeated threats."""
+    """Scenario 7: repeated equivalent threats stay bounded."""
 
     def test_risk_escalation_over_time(self):
-        """Multiple audio events escalate risk through state machine."""
+        """Repeated equivalent audio events should not snowball every tick."""
         ra = RiskAccumulator()
         sm = StateManager()
 
@@ -240,7 +247,7 @@ class TestScenarioRiskEscalation:
         event1 = ra.calculate_risk(risk_score, None, audio1, dt_seconds=1.0)
         risk_score = event1.score
         sm.update_state(event1.state, risk_score)
-        assert event1.state == RiskState.EVALUATING  # 30 + 35 = 65
+        assert event1.state == RiskState.EVALUATING
 
         # T=1: Second threat with minor decay
         audio2 = AudioEvent(
@@ -254,10 +261,11 @@ class TestScenarioRiskEscalation:
         event2 = ra.calculate_risk(risk_score, None, audio2, dt_seconds=1.0)
         risk_score = event2.score
         sm.update_state(event2.state, risk_score)
-        assert risk_score > event1.score  # Risk escalates
+        assert pytest.approx(risk_score, rel=1e-6) == event1.score
 
-        # Risk should be clamped at 100
+        # Risk should remain bounded and never climb to alert solely from repeats.
         assert risk_score <= 100.0
+        assert event2.state == RiskState.EVALUATING
 
 
 class TestScenarioWeaponDetection:

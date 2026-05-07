@@ -112,6 +112,7 @@ class TestWeaponDetector(unittest.TestCase):
                 weapon_classes=['knife', 'gun'],
                 conf_threshold=0.5
             )
+            self.detector.using_fallback_model = False
 
     def test_initialization(self):
         """Test detector initialization."""

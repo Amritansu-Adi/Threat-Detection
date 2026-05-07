@@ -28,16 +28,17 @@ Paper: DistilBERT: A distilled version of BERT (Sanh et al.)
 """
 
 import logging
+import os
 from typing import Tuple, Optional, Dict, List
 from enum import Enum
 
 try:
     from transformers import pipeline
     HAS_TRANSFORMERS = True
-except ImportError:
+except Exception as e:
     HAS_TRANSFORMERS = False
     logger = logging.getLogger(__name__)
-    logger.warning("transformers not installed - IntentClassifier will be stubbed")
+    logger.warning(f"transformers unavailable - IntentClassifier will use heuristics: {e}")
 
 logger = logging.getLogger(__name__)
 
@@ -62,7 +63,8 @@ class IntentClassifier:
         candidate_labels: Intent labels to classify against
     """
 
-    MODEL_NAME = "distilbert-base-uncased-finetuned-mnli"  # MNLI = inference
+    # Use a valid zero-shot MNLI model id.
+    MODEL_NAME = "typeform/distilbert-base-uncased-mnli"
     CANDIDATE_LABELS = [
         Intent.DISTRESS.value,
         Intent.THREAT.value,
@@ -80,21 +82,24 @@ class IntentClassifier:
         self.pipeline = None
         self.loaded = False
 
-        if HAS_TRANSFORMERS:
+        use_transformer = os.getenv("THREAT_USE_TRANSFORMER_INTENT", "1")
+        if HAS_TRANSFORMERS and use_transformer != "0":
             self._load_model()
         else:
-            logger.warning("IntentClassifier running in stub mode (transformers not installed)")
+            logger.info("IntentClassifier using fast heuristic mode")
 
     def _load_model(self) -> None:
         """Load DistilBERT zero-shot classifier."""
         try:
+            local_only = os.getenv("THREAT_TRANSFORMER_LOCAL_ONLY", "1") == "1"
             self.pipeline = pipeline(
                 task="zero-shot-classification",
                 model=self.MODEL_NAME,
                 device=0 if self.device == "cuda" else -1,  # -1 for CPU
+                local_files_only=local_only,
             )
             self.loaded = True
-            logger.info(f"✓ DistilBERT loaded: {self.MODEL_NAME}")
+            logger.info(f"✓ DistilBERT loaded: {self.MODEL_NAME} (local_only={local_only})")
         except Exception as e:
             logger.error(f"Failed to load DistilBERT: {e}")
             self.loaded = False
@@ -113,12 +118,11 @@ class IntentClassifier:
                 - intent: Intent enum or None if classification failed
                 - confidence: Confidence in top prediction (0.0-1.0)
         """
-        if not self.loaded:
-            logger.debug("IntentClassifier in stub mode - returning neutral")
-            return Intent.NEUTRAL, 0.5
-
         if not text or not text.strip():
             return Intent.NEUTRAL, 0.0
+
+        if not self.loaded:
+            return self._heuristic_classify(text)
 
         try:
             labels = candidate_labels or self.CANDIDATE_LABELS
@@ -147,6 +151,40 @@ class IntentClassifier:
         except Exception as e:
             logger.error(f"Error in intent classification: {e}")
             return Intent.NEUTRAL, 0.0
+
+    def _heuristic_classify(self, text: str) -> Tuple[Intent, float]:
+        """Fast offline classifier used when the transformer model is unavailable."""
+        lowered = text.lower()
+        distress_terms = (
+            "help", "fire", "emergency", "call police", "intruder",
+            "who is in here", "get out of my house", "please", "someone", "save me",
+        )
+        threat_terms = (
+            "kill", "hurt", "shoot", "stab", "weapon", "knife", "gun",
+            "get back", "show yourself", "damn it", "i will", "or else", "come out",
+        )
+        neutral_terms = (
+            "grocery", "store", "milk", "eggs", "minutes", "weather",
+            "did you know",
+        )
+        threat_hits = sum(1 for term in threat_terms if term in lowered)
+        distress_hits = sum(1 for term in distress_terms if term in lowered)
+        neutral_hits = sum(1 for term in neutral_terms if term in lowered)
+
+        has_exclaim = "!" in text
+        has_question = "?" in text
+
+        threat_score = threat_hits * 0.42 + (0.12 if has_exclaim else 0.0)
+        distress_score = distress_hits * 0.40 + (0.10 if has_exclaim else 0.0) + (0.06 if has_question else 0.0)
+        neutral_score = neutral_hits * 0.35
+
+        if threat_score >= max(distress_score, neutral_score, 0.32):
+            return Intent.THREAT, min(0.92, 0.58 + threat_score)
+        if distress_score >= max(threat_score, neutral_score, 0.30):
+            return Intent.DISTRESS, min(0.90, 0.56 + distress_score)
+        if neutral_score >= 0.25:
+            return Intent.NEUTRAL, min(0.86, 0.55 + neutral_score)
+        return Intent.NEUTRAL, 0.52
 
     def get_all_scores(
         self, text: str, candidate_labels: Optional[List[str]] = None

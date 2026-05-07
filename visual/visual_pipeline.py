@@ -24,7 +24,7 @@ from .weapon_mapper import WeaponMapper
 import sys
 import os
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
-from core.data_structures import VisualData, WeaponDetection as CoreWeaponDetection
+from core.data_structures import BoundingBox, VisualData, WeaponDetection as CoreWeaponDetection
 
 
 class VisualPipeline:
@@ -33,7 +33,7 @@ class VisualPipeline:
     def __init__(self,
                  # Detection config
                  person_model_path: str = "yolov8n.pt",
-                 weapon_model_path: str = "models/weapon_best.pt",
+                 weapon_model_path: str = "camera_detection/models/weapon_best.pt",
                  person_conf: float = 0.60,
                  person_min_area: int = 3500,
                  weapon_classes: List[str] = None,
@@ -46,7 +46,7 @@ class VisualPipeline:
                  # Processing config
                  target_fps: float = 30.0,
                  weapon_detect_every_n_frames: int = 3,
-                 face_recognize_every_n_frames: int = 10,
+                 face_recognize_every_n_frames: int = 30,
 
                  # Queue config
                  visual_to_fusion_queue: Optional[queue.Queue] = None,
@@ -90,6 +90,11 @@ class VisualPipeline:
             model_path=weapon_model_path,
             weapon_classes=weapon_classes or ['knife', 'scissors', 'gun', 'pistol', 'rifle']
         )
+        if getattr(self.weapon_detector, "using_fallback_model", False):
+            self.weapon_detect_every_n_frames = 1
+            logging.warning(
+                "Custom weapon model unavailable; increasing fallback weapon detection cadence to every frame"
+            )
 
         self.tracker = PersonTracker(
             max_age=tracker_max_age,
@@ -106,7 +111,16 @@ class VisualPipeline:
         self.frame_idx = 0
         self.last_process_time = 0.0
         self._last_frame: Optional[np.ndarray] = None  # For display
+        self.latest_visual_data: Optional[VisualData] = None
         self._frame_queue: queue.Queue = queue.Queue(maxsize=1)  # For frame passing
+        self._last_weapon_detections: List[Tuple] = []
+        self._last_weapon_frame_idx = -10_000
+        self._weapon_id_counter = 0
+        self.weapon_detection_ttl_frames = max(weapon_detect_every_n_frames * 2, 3)
+        self.weapon_association_hold_frames = max(weapon_detect_every_n_frames * 2, 6)
+        self._last_frame_context: Optional[Tuple[np.ndarray, float, int, Dict[int, TrackedPerson]]] = None
+        self.weapon_detection_ttl_frames = max(self.weapon_detect_every_n_frames * 3, 6)
+        self.weapon_association_hold_frames = max(self.weapon_detect_every_n_frames * 2, 6)
 
         # Statistics
         self.stats = {
@@ -115,6 +129,7 @@ class VisualPipeline:
             'persons_detected': 0,
             'weapons_detected': 0,
             'faces_recognized': 0,
+            'objects_detected': [],
             'processing_fps': 0.0,
             'avg_processing_time': 0.0
         }
@@ -157,7 +172,6 @@ class VisualPipeline:
         Returns:
             True if frame was accepted for processing
         """
-        print(f"[SUBMIT] submit_frame called with frame shape {frame.shape}", flush=True)
         if not self.running:
             logging.warning(f"Frame submit rejected: pipeline not running")
             return False
@@ -174,17 +188,20 @@ class VisualPipeline:
         frame_copy = frame.copy()
         self._last_frame = frame_copy
 
-        # Process frame in background
+        # Queue only the latest frame for processing.
         try:
             self.stats['frames_submitted'] += 1
             if self.frame_idx % 30 == 0:
                 logging.info(f"Frame {self.frame_idx}: Submitted for processing (total submitted: {self.stats['frames_submitted']})")
-            threading.Thread(
-                target=self._process_frame,
-                args=(frame_copy, timestamp or current_time, self.frame_idx),
-                name=f"VisualProcess-{self.frame_idx}",
-                daemon=True
-            ).start()
+
+            if self._frame_queue.full():
+                try:
+                    self._frame_queue.get_nowait()
+                    logging.debug("Dropped stale frame before queueing latest frame")
+                except queue.Empty:
+                    pass
+
+            self._frame_queue.put_nowait((frame_copy, timestamp or current_time, self.frame_idx))
 
             self.frame_idx += 1
             return True
@@ -194,21 +211,25 @@ class VisualPipeline:
             return False
 
     def _pipeline_loop(self):
-        """Main pipeline processing loop (currently unused - processing is per-frame)."""
+        """Main pipeline processing loop."""
         logging.info("VisualPipeline loop started")
         while self.running:
-            time.sleep(0.1)  # Idle when not processing frames
+            try:
+                frame, timestamp, frame_idx = self._frame_queue.get(timeout=0.1)
+            except queue.Empty:
+                self._emit_completed_weapon_detection_if_idle()
+                continue
+
+            self._process_frame(frame, timestamp, frame_idx)
         logging.info("VisualPipeline loop ended")
 
     def _process_frame(self, frame: np.ndarray, timestamp: float, frame_idx: int):
         """Process a single frame through the visual pipeline."""
-        print(f"[FRAME] Processing frame {frame_idx} start", flush=True)
         start_time = time.time()
 
         try:
             # 1. Person Detection
-            print(f"[FRAME] Frame {frame_idx}: Starting person detection", flush=True)
-            logging.info(f"Frame {frame_idx}: Starting person detection on {frame.shape} frame")
+            logging.debug(f"Frame {frame_idx}: Starting person detection on {frame.shape} frame")
             start_detect = time.time()
             try:
                 person_detections = self.person_detector.detect(frame)
@@ -216,10 +237,16 @@ class VisualPipeline:
                 logging.error(f"Frame {frame_idx}: detect() FAILED: {e}", exc_info=True)
                 person_detections = []
             detect_time = time.time() - start_detect
-            print(f"[DETECTION] Frame {frame_idx}: detect() returned {len(person_detections)} persons in {detect_time:.3f}s", flush=True)
-            logging.info(f"Frame {frame_idx}: detect() returned {len(person_detections)} persons in {detect_time:.3f}s")
-            for i, pd in enumerate(person_detections):
-                logging.info(f"  Person {i}: bbox={pd.bbox}, conf={pd.confidence}, area={(pd.bbox[2]-pd.bbox[0])*(pd.bbox[3]-pd.bbox[1])}")
+            logging.debug(f"Frame {frame_idx}: detect() returned {len(person_detections)} persons in {detect_time:.3f}s")
+            self.stats['objects_detected'] = [
+                {
+                    'label': obj.class_name,
+                    'confidence': obj.confidence,
+                    'bbox': obj.bbox,
+                }
+                for obj in getattr(self.person_detector, 'last_objects', [])
+            ]
+            
             self.stats['persons_detected'] += len(person_detections)
 
             # Convert to tracker format
@@ -228,20 +255,19 @@ class VisualPipeline:
 
             # 2. Tracking
             tracked_persons = self.tracker.update(dets, frame_idx)
-
+            tracked_persons = self._ensure_persons_for_ui(tracked_persons, person_detections)
+            tracked_persons = self._prune_duplicate_tracks(tracked_persons)
+            self._last_frame_context = (frame.copy(), timestamp, frame_idx, tracked_persons.copy())
+            
             # 3. Weapon Detection (every N frames)
-            weapon_detections = []
+            weapon_detections = self._collect_completed_weapon_detections(frame_idx)
             if frame_idx % self.weapon_detect_every_n_frames == 0:
                 person_bboxes = [p.bbox for p in tracked_persons.values()]
                 if person_bboxes:
                     self.weapon_detector.detect_async(frame, person_bboxes)
 
-                # Get any completed results
-                results = self.weapon_detector.get_results()
-                if results:
-                    weapon_detections = [(w.bbox[0], w.bbox[1], w.bbox[2], w.bbox[3], w.confidence, w.class_name)
-                                       for w in results]
-                    self.stats['weapons_detected'] += len(weapon_detections)
+            if not weapon_detections and frame_idx - self._last_weapon_frame_idx <= self.weapon_detection_ttl_frames:
+                weapon_detections = self._last_weapon_detections
 
             # 4. Face Recognition (every N frames, for persons without locked labels)
             if frame_idx % self.face_recognize_every_n_frames == 0:
@@ -263,12 +289,16 @@ class VisualPipeline:
             # Update tracker with weapon associations
             for person_id in tracked_persons.keys():
                 has_weapon = person_id in weapon_associations
-                self.tracker.update_weapon_association(person_id, has_weapon)
+                self.tracker.update_weapon_association(
+                    person_id,
+                    has_weapon,
+                    hold_frames=self.weapon_association_hold_frames,
+                )
 
             # 6. Check for fusion interrupts
             self._check_fusion_interrupts()
 
-            # 7. Emit VisualData to fusion queue
+            # Emit VisualData to fusion queue
             self._emit_visual_data(frame, timestamp, tracked_persons, weapon_associations, weapon_detections, frame_idx)
 
             # Update stats
@@ -282,19 +312,182 @@ class VisualPipeline:
         except Exception as e:
             logging.exception(f"Frame processing failed: {e}")
 
+    def _collect_completed_weapon_detections(self, frame_idx: int) -> List[Tuple]:
+        """Collect any completed async weapon result without waiting."""
+        results = self.weapon_detector.get_results()
+        if results is None:
+            return []
+
+        weapon_detections = [
+            (w.bbox[0], w.bbox[1], w.bbox[2], w.bbox[3], w.confidence, w.class_name)
+            for w in results
+        ]
+        weapon_detections = self._deduplicate_weapon_tuples(weapon_detections)
+        self._last_weapon_detections = weapon_detections
+        self._last_weapon_frame_idx = frame_idx
+        self.stats['weapons_detected'] += len(weapon_detections)
+        return weapon_detections
+
+    @staticmethod
+    def _bbox_iou_tuple(a: Tuple, b: Tuple) -> float:
+        ax1, ay1, ax2, ay2 = a[:4]
+        bx1, by1, bx2, by2 = b[:4]
+        x1 = max(ax1, bx1)
+        y1 = max(ay1, by1)
+        x2 = min(ax2, bx2)
+        y2 = min(ay2, by2)
+        if x2 <= x1 or y2 <= y1:
+            return 0.0
+        inter = (x2 - x1) * (y2 - y1)
+        area_a = (ax2 - ax1) * (ay2 - ay1)
+        area_b = (bx2 - bx1) * (by2 - by1)
+        union = area_a + area_b - inter
+        return inter / union if union > 0 else 0.0
+
+    def _deduplicate_weapon_tuples(self, detections: List[Tuple], iou_threshold: float = 0.45) -> List[Tuple]:
+        if len(detections) <= 1:
+            return detections
+        ranked = sorted(detections, key=lambda d: d[4], reverse=True)
+        kept: List[Tuple] = []
+        for det in ranked:
+            if any(self._bbox_iou_tuple(det, k) >= iou_threshold for k in kept):
+                continue
+            kept.append(det)
+        return kept
+
+    def _emit_completed_weapon_detection_if_idle(self):
+        """Emit a final update when async weapon detection completes after the last frame."""
+        if self._last_frame_context is None:
+            return
+
+        frame, timestamp, frame_idx, tracked_persons = self._last_frame_context
+        weapon_detections = self._collect_completed_weapon_detections(frame_idx)
+        if not weapon_detections:
+            return
+
+        persons_for_mapping = [
+            {
+                'id': person.id,
+                'bbox': person.bbox,
+                'name': person.get_label(),
+            }
+            for person in tracked_persons.values()
+        ]
+        weapon_associations = self.weapon_mapper.map_weapons_to_persons(
+            frame, weapon_detections, persons_for_mapping
+        )
+
+        for person_id in tracked_persons.keys():
+            self.tracker.update_weapon_association(
+                person_id,
+                person_id in weapon_associations,
+                hold_frames=self.weapon_association_hold_frames,
+            )
+
+        self._emit_visual_data(
+            frame,
+            timestamp,
+            tracked_persons,
+            weapon_associations,
+            weapon_detections,
+            frame_idx,
+        )
+
     def _perform_face_recognition(self, frame: np.ndarray, tracked_persons: Dict[int, TrackedPerson]):
         """Perform face recognition for persons that need it."""
         for person in tracked_persons.values():
             if person.label_lock_frames <= 0 and person.frames_in_view > 5:
-                # Extract face crop
+                # Extract upper-body crop first to avoid picking unrelated background faces.
                 x1, y1, x2, y2 = person.bbox
-                face_img = frame[max(0, y1):y2, max(0, x1):x2]
+                h = max(1, y2 - y1)
+                top_focus = y1 + int(0.58 * h)
+                face_img = frame[max(0, y1):max(0, top_focus), max(0, x1):x2]
 
                 if face_img.size > 0:
                     result = self.face_recognizer.recognize(face_img)
                     if result.name:
                         self.tracker.update_person_recognition(person.id, result.name)
                         self.stats['faces_recognized'] += 1
+
+    def _ensure_persons_for_ui(
+        self,
+        tracked_persons: Dict[int, TrackedPerson],
+        person_detections: List,
+    ) -> Dict[int, TrackedPerson]:
+        """Fallback to detector results when tracking returns no persons.
+
+        This keeps fusion/UI person counts aligned with visible YOLO detections
+        even if the tracker backend drops or rejects a frame.
+        """
+        if tracked_persons or not person_detections:
+            return tracked_persons
+
+        fallback_tracks: Dict[int, TrackedPerson] = {}
+        for idx, detection in enumerate(person_detections, start=1):
+            fallback_tracks[-idx] = TrackedPerson(
+                id=-idx,
+                bbox=detection.bbox,
+                confidence=detection.confidence,
+                frames_in_view=1,
+                last_seen_frame=self.frame_idx,
+            )
+        logging.warning(
+            "Tracker returned no persons despite %d YOLO detections; using detector fallback for fusion/UI",
+            len(fallback_tracks),
+        )
+        return fallback_tracks
+
+    def _prune_duplicate_tracks(
+        self,
+        tracked_persons: Dict[int, TrackedPerson],
+        iou_threshold: float = 0.65,
+    ) -> Dict[int, TrackedPerson]:
+        """Suppress overlapping tracks that likely represent the same person."""
+        if len(tracked_persons) <= 1:
+            return tracked_persons
+
+        ranked_tracks = sorted(
+            tracked_persons.items(),
+            key=lambda item: (item[1].frames_in_view, item[1].confidence),
+            reverse=True,
+        )
+
+        kept: Dict[int, TrackedPerson] = {}
+        kept_boxes = []
+
+        for track_id, person in ranked_tracks:
+            if any(self._bbox_iou(person.bbox, bbox) >= iou_threshold for bbox in kept_boxes):
+                logging.debug("Suppressed duplicate track %s with bbox %s", track_id, person.bbox)
+                continue
+
+            kept[track_id] = person
+            kept_boxes.append(person.bbox)
+
+        return kept
+
+    @staticmethod
+    def _bbox_iou(
+        bbox1: Tuple[int, int, int, int],
+        bbox2: Tuple[int, int, int, int],
+    ) -> float:
+        """Calculate IoU between two bounding boxes."""
+        x1_1, y1_1, x2_1, y2_1 = bbox1
+        x1_2, y1_2, x2_2, y2_2 = bbox2
+
+        x1_i = max(x1_1, x1_2)
+        y1_i = max(y1_1, y1_2)
+        x2_i = min(x2_1, x2_2)
+        y2_i = min(y2_1, y2_2)
+
+        if x2_i <= x1_i or y2_i <= y1_i:
+            return 0.0
+
+        intersection = (x2_i - x1_i) * (y2_i - y1_i)
+        area1 = (x2_1 - x1_1) * (y2_1 - y1_1)
+        area2 = (x2_2 - x1_2) * (y2_2 - y1_2)
+        union = area1 + area2 - intersection
+
+        return intersection / union if union > 0 else 0.0
 
     def _check_fusion_interrupts(self):
         """Check for interrupts from fusion manager."""
@@ -319,9 +512,6 @@ class VisualPipeline:
                          weapon_detections: List[Tuple],
                          frame_idx: int):
         """Emit VisualData to fusion queue."""
-        if not self.visual_to_fusion_q:
-            return
-
         try:
             # Convert tracked persons to core format
             persons = []
@@ -331,11 +521,12 @@ class VisualPipeline:
                     'bbox': person.bbox,
                     'confidence': person.confidence,
                     'label': person.get_label(),
+                    'identity': person.get_label().upper(),  # Normalize for fusion manager compatibility
                     'has_weapon': person.has_weapon,
                     'frames_in_view': person.frames_in_view,
                     'velocity': person.velocity
                 })
-
+            
             # Convert weapon detections to core format
             logging.info(f"Frame {frame_idx}: Weapon detection - found {len(weapon_detections)} weapons")
             weapons = []
@@ -346,11 +537,14 @@ class VisualPipeline:
                     if (wx1, wy1, wx2, wy2, wconf, wlabel) in weapon_list:
                         associated_person = person_id
                         break
+                self._weapon_id_counter += 1
+                detection_id = f"W{self._weapon_id_counter}"
 
                 weapons.append(CoreWeaponDetection(
-                    bbox=(wx1, wy1, wx2, wy2),
+                    bbox=BoundingBox(wx1, wy1, wx2, wy2, confidence=wconf),
+                    weapon_type=wlabel,
                     confidence=wconf,
-                    class_name=wlabel,
+                    detection_id=detection_id,
                     associated_person_id=associated_person
                 ))
 
@@ -362,9 +556,11 @@ class VisualPipeline:
                 weapons=weapons,
                 processing_stats=self.stats.copy()
             )
+            self.latest_visual_data = visual_data
 
             # Emit to queue (non-blocking)
-            self.visual_to_fusion_q.put(visual_data, block=False)
+            if self.visual_to_fusion_q:
+                self.visual_to_fusion_q.put(visual_data, block=False)
 
         except queue.Full:
             logging.warning("Visual-to-fusion queue full, dropping frame")
@@ -382,6 +578,7 @@ class VisualPipeline:
             'persons_detected': 0,
             'weapons_detected': 0,
             'faces_recognized': 0,
+            'objects_detected': [],
             'processing_fps': 0.0,
             'avg_processing_time': 0.0
         }

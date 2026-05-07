@@ -9,19 +9,20 @@ system:
 
 visual:
   # Person detection settings
-  person_model: yolov8n.pt                    # YOLO model for person detection
-  weapon_model: yolov8n.pt                    # YOLO model for weapon detection (fallback)
-  person_conf: 0.30                           # Person detection confidence threshold
-  person_min_area: 2000                       # Minimum person bounding box area (pixels)
+  person_model: yolov8n.pt
+  weapon_model: camera_detection/models/weapon_best.pt
+  person_conf: 0.60                           # Person detection confidence threshold
+  person_min_area: 3500                       # Minimum person bounding box area (pixels)
 
   # Processing frequency settings
   weapon_detect_every_n: 3                    # Run weapon detection every N frames
-  face_recognize_every_n: 10                  # Run face recognition every N frames
+  face_recognize_every_n: 30                  # Run face recognition every N frames
 
 audio:
   # Audio processing settings
   sample_rate: 16000                          # Audio sample rate (Hz)
   device: cpu                                 # Processing device (cpu/cuda)
+  vad_model: models/silero_vad.onnx           # Silero VAD ONNX file (fallbacks to energy gate if missing)
 
 fusion:
   # Risk calculation settings

@@ -11,6 +11,7 @@ from typing import List, Dict, Optional, Tuple
 from dataclasses import dataclass, field
 from collections import deque
 import time
+import numpy as np
 
 try:
     from utils.person_tracker import PersonTracker as ByteTrackPersonTracker
@@ -25,8 +26,10 @@ class TrackedPerson:
     id: int
     bbox: Tuple[int, int, int, int]  # Current bbox
     confidence: float
-    label: str = "Unknown"  # Identity name
+    label: str = "UNKNOWN"  # Identity name
     has_weapon: bool = False
+    weapon_last_seen_frame: int = -1
+    weapon_hold_frames: int = 6
     frames_in_view: int = 0
     last_seen_frame: int = 0
     label_lock_frames: int = 0  # Frames until next recognition attempt
@@ -55,7 +58,7 @@ class TrackedPerson:
 
     def update_recognition(self, name: str, lock_frames: int = 30):
         """Update identity recognition result."""
-        if name and name != "Unknown":
+        if name and name.upper() != "UNKNOWN":
             self.label = name
             self.label_lock_frames = lock_frames
 
@@ -66,7 +69,7 @@ class TrackedPerson:
 
     def is_unknown(self) -> bool:
         """Check if person is unknown."""
-        return self.label == "Unknown"
+        return self.label.upper() == "UNKNOWN"
 
     def has_been_visible_long_enough(self, min_frames: int = 20) -> bool:
         """Check if person has been visible for minimum frames."""
@@ -127,41 +130,53 @@ class PersonTracker:
         self.frame_idx = frame_idx
 
         if self.use_bytetrack and self.tracker is not None:
-            return self._update_bytetrack(detections)
-        else:
-            return self._update_fallback(detections)
+            tracks = self._update_bytetrack(detections)
+            if detections and not tracks:
+                logging.warning(
+                    "ByteTrack returned no tracks for %d detections on frame %d; falling back to local tracker",
+                    len(detections),
+                    frame_idx,
+                )
+                return self._update_fallback(detections)
+            return tracks
+
+        return self._update_fallback(detections)
 
     def _update_bytetrack(self, detections: List[Tuple]) -> Dict[int, TrackedPerson]:
         """Update using ByteTrack implementation."""
         # Convert detections to expected format
         dets = []
-        for x1, y1, x2, y2, conf, _ in detections:
-            dets.append([x1, y1, x2, y2, conf])
+        for x1, y1, x2, y2, conf, class_name in detections:
+            dets.append([x1, y1, x2, y2, conf, class_name])
 
         # Update ByteTrack
         try:
-            tracks = self.tracker.update(np.array(dets), self.frame_idx)
-        except:
-            tracks = []
+            tracks = self.tracker.update(dets, self.frame_idx)
+        except Exception as e:
+            logging.exception("ByteTrack update failed")
+            tracks = {}  # Return empty dict, not empty list
 
         # Convert to our TrackedPerson format
         active_tracks = {}
-        for track in tracks:
-            track_id = int(track.track_id)
-            x1, y1, x2, y2 = [int(v) for v in track.tlbr]
-            conf = float(track.score)
+        if isinstance(tracks, dict):
+            for track_id, person_obj in tracks.items():  # tracks is OrderedDict[int, Person]
+                # Extract data from Person object
+                track_id = person_obj.id
+                x1, y1, x2, y2 = person_obj.bbox
+                conf = 0.95  # Person tracker doesn't have confidence, use high confidence
+                
+                if track_id not in self.active_tracks:
+                    self.active_tracks[track_id] = TrackedPerson(
+                        id=track_id,
+                        bbox=(x1, y1, x2, y2),
+                        confidence=conf,
+                        label=person_obj.label  # Use existing label from tracker
+                    )
 
-            if track_id not in self.active_tracks:
-                self.active_tracks[track_id] = TrackedPerson(
-                    id=track_id,
-                    bbox=(x1, y1, x2, y2),
-                    confidence=conf
-                )
-
-            person = self.active_tracks[track_id]
-            person.update_position((x1, y1, x2, y2), self.frame_idx)
-            person.decrement_lock()
-            active_tracks[track_id] = person
+                person = self.active_tracks[track_id]
+                person.update_position((x1, y1, x2, y2), self.frame_idx)
+                person.decrement_lock()
+                active_tracks[track_id] = person
 
         # Remove old tracks
         to_remove = []
@@ -237,10 +252,20 @@ class PersonTracker:
         if person_id in self.active_tracks:
             self.active_tracks[person_id].update_recognition(name)
 
-    def update_weapon_association(self, person_id: int, has_weapon: bool):
+    def update_weapon_association(self, person_id: int, has_weapon: bool, hold_frames: Optional[int] = None):
         """Update weapon association for a person."""
         if person_id in self.active_tracks:
-            self.active_tracks[person_id].has_weapon = has_weapon
+            person = self.active_tracks[person_id]
+            hold = hold_frames if hold_frames is not None else person.weapon_hold_frames
+            if has_weapon:
+                person.weapon_last_seen_frame = self.frame_idx
+                person.has_weapon = True
+                return
+
+            person.has_weapon = (
+                person.weapon_last_seen_frame >= 0
+                and self.frame_idx - person.weapon_last_seen_frame <= hold
+            )
 
     def get_person(self, person_id: int) -> Optional[TrackedPerson]:
         """Get tracked person by ID."""

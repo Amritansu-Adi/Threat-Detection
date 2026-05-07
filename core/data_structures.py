@@ -100,6 +100,7 @@ class WeaponDetection:
     bbox: BoundingBox  # Weapon bounding box
     weapon_type: str  # "knife", "gun", "rifle", etc.
     confidence: float  # Detection confidence (0.0-1.0)
+    detection_id: Optional[str] = None  # Stable ID for UI/debug
     associated_person_id: Optional[int] = None  # track_id if held by person
     timestamp: float = field(default_factory=time.time)
 
