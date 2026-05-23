@@ -62,7 +62,7 @@ Demo is not a different logic path; it is a replay harness using the same visual
 ## 4) Environment and dependencies (your setup)
 
 Project path:
-- `C:\programing\MachineLearning\person_detect\yolo`
+- `C:\\programing\\MachineLearning\\threat_detection_system`
 
 Conda env used by scripts:
 - `threat-detect`
@@ -74,7 +74,7 @@ Install requirements:
 
 ```powershell
 conda activate threat-detect
-cd C:\programing\MachineLearning\person_detect\yolo
+cd C:\\programing\\MachineLearning\\threat_detection_system
 pip install -r requirements.txt
 ```
 
@@ -94,7 +94,7 @@ From PowerShell:
 
 ```powershell
 conda activate threat-detect
-cd C:\programing\MachineLearning\person_detect\yolo
+cd C:\\programing\\MachineLearning\\threat_detection_system
 python main.py --verbose
 ```
 
@@ -246,14 +246,14 @@ General:
 
 ```powershell
 conda activate threat-detect
-cd C:\programing\MachineLearning\person_detect\yolo
+cd C:\\programing\\MachineLearning\\threat_detection_system
 pytest -q
 ```
 
 Focused unit tests (example):
 
 ```powershell
-pytest -p no:cacheprovider test_unit_core.py test_unit_fusion.py -q
+pytest -p no:cacheprovider tests/legacy/test_unit_core.py tests/legacy/test_unit_fusion.py -q
 ```
 
 ---
@@ -273,3 +273,4 @@ pytest -p no:cacheprovider test_unit_core.py test_unit_fusion.py -q
 
 This app is a **realtime decision-support system** and should be tuned with your real scene data.  
 For deployment, validate thresholds and risk behavior clip-by-clip with representative homeowner/unknown/weapon/audio scenarios.
+
