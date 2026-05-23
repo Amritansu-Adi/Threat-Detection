@@ -46,3 +46,65 @@ Thumbs.db
 # Archives
 *.zip
 *.tar.gz
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.env
+.env.*
+.venv/
+venv/
+ENV/
+env/
+.conda/
+
+# VS Code / IDE
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# Python packaging
+dist/
+build/
+*.egg-info/
+
+# Data, models, weights and outputs
+data/
+runs/
+weights/
+*.pt
+camera_detection/models/*.pt
+alerts/
+TEST/out/
+data/*.yaml
+demo_outputs/
+validation_output.txt
+.ultralytics/
+Ultralytics/
+
+# Training artifacts
+fine_tuning_behaviour/checkpoints/
+fine_tuning_behaviour/video_dataset/
+fine_tuning_behaviour/audio_dataset/
+
+# Test-generated fixtures
+tests/fixtures/generated/
+
+# Notebooks
+.ipynb_checkpoints/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+debug_output.log
+threat_detection.log
+
+# Archives
+*.zip
+*.tar.gz
