@@ -45,10 +45,13 @@ class RiskWeights:
     unknown_person_base: float = 8.0  # Unknown person in scene after grace period
     weapon_base: float = 6.0  # Unassociated weapon/object risk
     associated_weapon_base: float = 26.0  # Weapon associated with a person
-    authorized_with_weapon: float = 3.0  # Known resident holding a plausible weapon/tool
+    authorized_with_weapon: float = 0.5  # Known resident holding a plausible weapon/tool
     unknown_with_weapon: float = 26.0  # Additional points if unknown person has weapon
     unknown_grace_frames: int = 15  # Allow identity recognition before scoring unknowns
     max_unknown_person_risk: float = 20.0
+    safe_scene_decay_multiplier: float = 0.25  # Extra decay when only known people remain
+    safe_scene_risk_cap: float = 12.0  # Keep risk very low in known-safe scenes
+    known_armed_relief_per_sec: float = 12.0  # Pull risk down when only known/authorized armed actors remain
     
     # Audio emotion weights (Stage 2: DistilHuBERT)
     anger_high_conf: float = 15.0  # High confidence anger
@@ -66,6 +69,8 @@ class RiskWeights:
     # Confidence thresholds
     emotion_confidence_threshold: float = 0.80  # Only strong emotions trigger
     intent_confidence_threshold: float = 0.75  # Intent must be confident
+    severe_audio_evaluating_floor: float = 50.0  # Distress/threat audio should reach EVALUATING
+    sudden_anomaly_evaluating_floor: float = 50.0  # Glass-break style anomaly + distress should reach EVALUATING
 
 
 class RiskAccumulator:
@@ -147,6 +152,23 @@ class RiskAccumulator:
         )
         evidence_scale = max(0.20, min(1.0, dt_seconds))
         total_risk = decayed_risk + (weighted_input * self.beta * evidence_scale)
+
+        # Explicit relief: known/authorized armed actors without threat-intent audio
+        # should not continuously escalate risk.
+        known_armed_relief = self._known_armed_safe_relief(visual_data, audio_event) * evidence_scale
+        if known_armed_relief > 0:
+            total_risk = max(0.0, total_risk - known_armed_relief)
+
+        # Fast de-escalation: if scene is known and audio doesn't indicate active threat,
+        # aggressively reduce stale risk so it does not keep climbing from old evidence.
+        if self._is_known_safe_scene(visual_data, audio_event):
+            total_risk *= self.weights.safe_scene_decay_multiplier
+            total_risk = min(total_risk, self.weights.safe_scene_risk_cap)
+
+        # Audio floor: severe distress/threat cues must push state to at least EVALUATING.
+        floor = self._audio_escalation_floor(audio_event)
+        if floor > 0:
+            total_risk = max(total_risk, floor)
 
         # Clamp to [0, 100]
         total_risk = max(0.0, min(100.0, total_risk))
@@ -233,12 +255,48 @@ class RiskAccumulator:
 
     def _calculate_unassociated_weapon_risk(self, weapons: List[WeaponDetection]) -> float:
         """Score weapon-like detections that are not tied to a visible person."""
+        weapons = self._deduplicate_unassociated_weapons(weapons or [])
         risk = 0.0
-        for weapon in weapons or []:
+        for weapon in weapons:
             if weapon.associated_person_id is None:
                 # Unassociated weapon-like detections are weak evidence.
                 risk += self.weights.weapon_base * max(0.1, weapon.confidence)
         return risk
+
+    def _deduplicate_unassociated_weapons(
+        self,
+        weapons: List[WeaponDetection],
+        iou_threshold: float = 0.50,
+    ) -> List[WeaponDetection]:
+        """Reduce duplicate weapon boxes so one knife isn't scored as many."""
+        unassociated = [w for w in weapons if w.associated_person_id is None]
+        if len(unassociated) <= 1:
+            return weapons
+
+        ranked = sorted(unassociated, key=lambda w: w.confidence, reverse=True)
+        kept: List[WeaponDetection] = []
+        for weapon in ranked:
+            if any(self._bbox_iou_weapon(weapon.bbox, k.bbox) >= iou_threshold for k in kept):
+                continue
+            kept.append(weapon)
+        associated = [w for w in weapons if w.associated_person_id is not None]
+        return associated + kept
+
+    @staticmethod
+    def _bbox_iou_weapon(a, b) -> float:
+        ax1, ay1, ax2, ay2 = a.x1, a.y1, a.x2, a.y2
+        bx1, by1, bx2, by2 = b.x1, b.y1, b.x2, b.y2
+        x1 = max(ax1, bx1)
+        y1 = max(ay1, by1)
+        x2 = min(ax2, bx2)
+        y2 = min(ay2, by2)
+        if x2 <= x1 or y2 <= y1:
+            return 0.0
+        inter = (x2 - x1) * (y2 - y1)
+        area_a = max(0.0, (ax2 - ax1) * (ay2 - ay1))
+        area_b = max(0.0, (bx2 - bx1) * (by2 - by1))
+        union = area_a + area_b - inter
+        return inter / union if union > 0 else 0.0
 
     def _calculate_audio_risk(self, audio_event: AudioEvent) -> float:
         """Calculate risk from audio analysis.
@@ -359,6 +417,94 @@ class RiskAccumulator:
         # Add visual context capabilities here in future (e.g., if laughing faces visible)
 
         return audio_risk
+
+    def _audio_escalation_floor(self, audio_event: Optional[AudioEvent]) -> float:
+        """Return minimum risk floor for severe audio-only incidents."""
+        if not audio_event:
+            return 0.0
+
+        intent_is_severe = (
+            audio_event.intent in (IntentType.DISTRESS, IntentType.THREAT)
+            and audio_event.intent_confidence >= self.weights.intent_confidence_threshold
+        )
+        if intent_is_severe:
+            return self.weights.severe_audio_evaluating_floor
+
+        features = audio_event.raw_audio_features or {}
+        sudden_anomaly = bool(features.get("sudden_anomaly", False))
+        anomaly_score = float(features.get("anomaly_score", 0.0))
+        distress_like_phrase = any(
+            token in (audio_event.transcript or "").lower()
+            for token in ("who's there", "who is there", "help", "intruder", "get out")
+        )
+        if sudden_anomaly and anomaly_score >= 0.72 and distress_like_phrase:
+            return self.weights.sudden_anomaly_evaluating_floor
+
+        return 0.0
+
+    def _known_armed_safe_relief(
+        self,
+        visual_data: Optional[VisualData],
+        audio_event: Optional[AudioEvent],
+    ) -> float:
+        """Return per-second risk relief when only known people are armed."""
+        if not visual_data:
+            return 0.0
+
+        persons = self._get_visual_persons(visual_data)
+        if not persons:
+            return 0.0
+
+        unknown_present = any(
+            self._is_unknown_identity(self._person_identity(p))
+            for p in persons
+        )
+        if unknown_present:
+            return 0.0
+
+        known_armed_count = sum(
+            1 for p in persons if self._person_has_weapon(p)
+        )
+        if known_armed_count <= 0:
+            return 0.0
+
+        # Keep relief disabled when high-confidence threat/distress intent is active.
+        if (
+            audio_event
+            and audio_event.intent in (IntentType.THREAT, IntentType.DISTRESS)
+            and audio_event.intent_confidence >= self.weights.intent_confidence_threshold
+        ):
+            return 0.0
+
+        return self.weights.known_armed_relief_per_sec * float(known_armed_count)
+
+    def _is_known_safe_scene(
+        self,
+        visual_data: Optional[VisualData],
+        audio_event: Optional[AudioEvent],
+    ) -> bool:
+        """True when visual scene is known/authorized and no active threat-intent audio exists."""
+        persons = self._get_visual_persons(visual_data)
+        if not persons:
+            return False
+
+        unknown_present = any(
+            self._is_unknown_identity(self._person_identity(p))
+            for p in persons
+        )
+        if unknown_present:
+            return False
+
+        if not audio_event:
+            return True
+
+        if (
+            audio_event.intent in (IntentType.THREAT, IntentType.DISTRESS)
+            and audio_event.intent_confidence >= self.weights.intent_confidence_threshold
+        ):
+            return False
+
+        return True
 
     def _risk_to_state(self, risk_score: float) -> RiskState:
         """Convert risk score to state machine state.
@@ -488,6 +634,9 @@ class RiskAccumulator:
                 if bool((audio_event.raw_audio_features or {}).get("sudden_anomaly", False)):
                     score = float((audio_event.raw_audio_features or {}).get("anomaly_score", 0.0))
                     factors.append(f"- Sudden sound anomaly ({score:.2f})")
+                floor = self._audio_escalation_floor(audio_event)
+                if floor >= self.weights.severe_audio_evaluating_floor:
+                    factors.append(f"- Audio escalation floor active ({floor:.0f})")
 
         if decay_factor < 0.95:
             factors.append(f"Temporal decay applied ({decay_factor:.3f})")

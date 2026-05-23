@@ -89,7 +89,7 @@ class FusionManager:
         self._latest_audio_event: Optional[AudioEvent] = None
         self._latest_audio_seen_at = 0.0
         self.visual_ttl_sec = 1.0
-        self.audio_ttl_sec = 2.5
+        self.audio_ttl_sec = 5.0
 
         # Callbacks
         self._on_alert_callbacks = []

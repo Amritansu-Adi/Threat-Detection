@@ -276,6 +276,10 @@ class DisplayManager:
             visual_risk = float(risk_details.get('visual_risk', 0.0))
             audio_risk = float(risk_details.get('audio_risk', 0.0))
             factors = list(risk_details.get('contributing_factors', []) or [])
+            audio_floor_active = any(
+                "audio escalation floor active" in str(f).lower()
+                for f in factors
+            )
             cv2.putText(
                 annotated,
                 f"V {visual_risk:.1f} | A {audio_risk:.1f}",
@@ -285,7 +289,16 @@ class DisplayManager:
                 (220, 220, 220),
                 1
             )
-            reason_y = info_y + 110
+            cv2.putText(
+                annotated,
+                f"AUDIO CHECK: {'FLOOR ON' if audio_floor_active else 'NORMAL'}",
+                (w - 250, info_y + 102),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.52,
+                (0, 220, 255) if audio_floor_active else (180, 180, 180),
+                1
+            )
+            reason_y = info_y + 124
             for factor in factors[:3]:
                 clean = str(factor).lstrip("- ").strip()
                 if not clean:

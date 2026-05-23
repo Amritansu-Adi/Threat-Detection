@@ -192,7 +192,7 @@ class SystemManager:
             queue_manager=self.queue_manager,
             vad_model_path=vad_model_path,
             device=audio_config.get("device", "cpu"),
-            should_process_audio=lambda: self.shared_state.get_visual_summary().get("persons_count", 0) > 0,
+            should_process_audio=lambda: True,
         )
         logger.info("AudioPipeline initialized")
 

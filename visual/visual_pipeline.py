@@ -74,6 +74,7 @@ class VisualPipeline:
         self.frame_interval = 1.0 / target_fps if target_fps > 0 else 0
         self.weapon_detect_every_n_frames = weapon_detect_every_n_frames
         self.face_recognize_every_n_frames = face_recognize_every_n_frames
+        self.unknown_face_recognize_every_n_frames = max(2, face_recognize_every_n_frames // 6)
 
         # Queues
         self.visual_to_fusion_q = visual_to_fusion_queue
@@ -116,11 +117,13 @@ class VisualPipeline:
         self._last_weapon_detections: List[Tuple] = []
         self._last_weapon_frame_idx = -10_000
         self._weapon_id_counter = 0
+        self._weapon_tracks: Dict[str, Dict] = {}
         self.weapon_detection_ttl_frames = max(weapon_detect_every_n_frames * 2, 3)
         self.weapon_association_hold_frames = max(weapon_detect_every_n_frames * 2, 6)
         self._last_frame_context: Optional[Tuple[np.ndarray, float, int, Dict[int, TrackedPerson]]] = None
         self.weapon_detection_ttl_frames = max(self.weapon_detect_every_n_frames * 3, 6)
         self.weapon_association_hold_frames = max(self.weapon_detect_every_n_frames * 2, 6)
+        self._weapon_track_ttl_frames = max(self.weapon_detection_ttl_frames * 2, 12)
 
         # Statistics
         self.stats = {
@@ -269,8 +272,8 @@ class VisualPipeline:
             if not weapon_detections and frame_idx - self._last_weapon_frame_idx <= self.weapon_detection_ttl_frames:
                 weapon_detections = self._last_weapon_detections
 
-            # 4. Face Recognition (every N frames, for persons without locked labels)
-            if frame_idx % self.face_recognize_every_n_frames == 0:
+            # 4. Face Recognition (adaptive cadence for faster unknown->known transitions)
+            if self._should_run_face_recognition(frame_idx, tracked_persons):
                 self._perform_face_recognition(frame, tracked_persons)
 
             # 5. Weapon Association
@@ -355,6 +358,60 @@ class VisualPipeline:
             kept.append(det)
         return kept
 
+    def _assign_weapon_track_ids(
+        self,
+        weapon_detections: List[Tuple],
+        frame_idx: int,
+    ) -> List[Tuple[str, Tuple]]:
+        """Assign persistent IDs to weapons based on IoU matching across frames."""
+        if not weapon_detections:
+            self._expire_weapon_tracks(frame_idx)
+            return []
+
+        assignments: List[Tuple[str, Tuple]] = []
+        used_track_ids = set()
+
+        for det in weapon_detections:
+            best_track_id = None
+            best_iou = 0.0
+            for track_id, track in self._weapon_tracks.items():
+                if track_id in used_track_ids:
+                    continue
+                if track.get("label") != det[5]:
+                    continue
+                iou = self._bbox_iou_tuple(det, track["det"])
+                if iou > best_iou:
+                    best_iou = iou
+                    best_track_id = track_id
+
+            if best_track_id is not None and best_iou >= 0.45:
+                self._weapon_tracks[best_track_id]["det"] = det
+                self._weapon_tracks[best_track_id]["last_seen_frame"] = frame_idx
+                used_track_ids.add(best_track_id)
+                assignments.append((best_track_id, det))
+            else:
+                self._weapon_id_counter += 1
+                new_id = f"W{self._weapon_id_counter}"
+                self._weapon_tracks[new_id] = {
+                    "det": det,
+                    "label": det[5],
+                    "last_seen_frame": frame_idx,
+                }
+                used_track_ids.add(new_id)
+                assignments.append((new_id, det))
+
+        self._expire_weapon_tracks(frame_idx)
+        return assignments
+
+    def _expire_weapon_tracks(self, frame_idx: int) -> None:
+        stale_ids = [
+            track_id
+            for track_id, track in self._weapon_tracks.items()
+            if frame_idx - int(track.get("last_seen_frame", frame_idx)) > self._weapon_track_ttl_frames
+        ]
+        for track_id in stale_ids:
+            self._weapon_tracks.pop(track_id, None)
+
     def _emit_completed_weapon_detection_if_idle(self):
         """Emit a final update when async weapon detection completes after the last frame."""
         if self._last_frame_context is None:
@@ -396,7 +453,7 @@ class VisualPipeline:
     def _perform_face_recognition(self, frame: np.ndarray, tracked_persons: Dict[int, TrackedPerson]):
         """Perform face recognition for persons that need it."""
         for person in tracked_persons.values():
-            if person.label_lock_frames <= 0 and person.frames_in_view > 5:
+            if person.label_lock_frames <= 0 and person.frames_in_view >= 2:
                 # Extract upper-body crop first to avoid picking unrelated background faces.
                 x1, y1, x2, y2 = person.bbox
                 h = max(1, y2 - y1)
@@ -408,6 +465,29 @@ class VisualPipeline:
                     if result.name:
                         self.tracker.update_person_recognition(person.id, result.name)
                         self.stats['faces_recognized'] += 1
+
+    def _should_run_face_recognition(
+        self,
+        frame_idx: int,
+        tracked_persons: Dict[int, TrackedPerson],
+    ) -> bool:
+        """Run face recognition more frequently while unknown persons are visible."""
+        if not tracked_persons:
+            return False
+
+        unknown_visible = any(
+            p.get_label().strip().upper() in {"", "UNKNOWN", "UNKNOWN_ENTITY", "UNRECOGNIZED", "NONE"}
+            and p.label_lock_frames <= 0
+            and p.frames_in_view >= 2
+            for p in tracked_persons.values()
+        )
+        cadence = (
+            self.unknown_face_recognize_every_n_frames
+            if unknown_visible
+            else self.face_recognize_every_n_frames
+        )
+        cadence = max(1, cadence)
+        return frame_idx % cadence == 0
 
     def _ensure_persons_for_ui(
         self,
@@ -440,7 +520,8 @@ class VisualPipeline:
     def _prune_duplicate_tracks(
         self,
         tracked_persons: Dict[int, TrackedPerson],
-        iou_threshold: float = 0.65,
+        iou_threshold: float = 0.55,
+        center_dist_threshold_px: float = 45.0,
     ) -> Dict[int, TrackedPerson]:
         """Suppress overlapping tracks that likely represent the same person."""
         if len(tracked_persons) <= 1:
@@ -456,7 +537,18 @@ class VisualPipeline:
         kept_boxes = []
 
         for track_id, person in ranked_tracks:
-            if any(self._bbox_iou(person.bbox, bbox) >= iou_threshold for bbox in kept_boxes):
+            person_center = self._bbox_center(person.bbox)
+            is_duplicate = False
+            for bbox in kept_boxes:
+                if self._bbox_iou(person.bbox, bbox) >= iou_threshold:
+                    is_duplicate = True
+                    break
+                kept_center = self._bbox_center(bbox)
+                center_dist = ((person_center[0] - kept_center[0]) ** 2 + (person_center[1] - kept_center[1]) ** 2) ** 0.5
+                if center_dist <= center_dist_threshold_px:
+                    is_duplicate = True
+                    break
+            if is_duplicate:
                 logging.debug("Suppressed duplicate track %s with bbox %s", track_id, person.bbox)
                 continue
 
@@ -488,6 +580,11 @@ class VisualPipeline:
         union = area1 + area2 - intersection
 
         return intersection / union if union > 0 else 0.0
+
+    @staticmethod
+    def _bbox_center(bbox: Tuple[int, int, int, int]) -> Tuple[float, float]:
+        x1, y1, x2, y2 = bbox
+        return ((x1 + x2) / 2.0, (y1 + y2) / 2.0)
 
     def _check_fusion_interrupts(self):
         """Check for interrupts from fusion manager."""
@@ -530,15 +627,14 @@ class VisualPipeline:
             # Convert weapon detections to core format
             logging.info(f"Frame {frame_idx}: Weapon detection - found {len(weapon_detections)} weapons")
             weapons = []
-            for wx1, wy1, wx2, wy2, wconf, wlabel in weapon_detections:
+            weapon_id_pairs = self._assign_weapon_track_ids(weapon_detections, frame_idx)
+            for detection_id, (wx1, wy1, wx2, wy2, wconf, wlabel) in weapon_id_pairs:
                 # Find associated person
                 associated_person = None
                 for person_id, weapon_list in weapon_associations.items():
                     if (wx1, wy1, wx2, wy2, wconf, wlabel) in weapon_list:
                         associated_person = person_id
                         break
-                self._weapon_id_counter += 1
-                detection_id = f"W{self._weapon_id_counter}"
 
                 weapons.append(CoreWeaponDetection(
                     bbox=BoundingBox(wx1, wy1, wx2, wy2, confidence=wconf),
