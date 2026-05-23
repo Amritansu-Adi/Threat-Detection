@@ -73,3 +73,7 @@ threat_detection.log
 # Archives
 *.zip
 *.tar.gz
+**/__pycache__/
+*.pyc
+*.pyo
+*.pyd

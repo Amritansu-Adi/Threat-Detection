@@ -19,7 +19,6 @@ else:
     known_names = []
 
 def recognize_face(face_img):
-    
     aligned = mtcnn(Image.fromarray(face_img))
     if aligned is None:
         return None, None

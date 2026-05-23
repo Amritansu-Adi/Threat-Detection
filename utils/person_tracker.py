@@ -119,7 +119,7 @@ class PersonTracker:
                 person = self.objects[object_id]
                 person.centroid = input_centroids[col]
                 person.bbox = person_boxes[col][:4]
-                person.disappeared = 0
+                self.disappeared[object_id] = 0  # Reset disappeared counter
                 person.frames_in_view += 1
                 
                 # Decrement lock counter if it's active

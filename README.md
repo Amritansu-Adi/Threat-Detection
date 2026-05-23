@@ -1,282 +1,276 @@
-# Autonomous Multi-Modal Intelligence Ecosystem
+# Threat Detection System (Realtime + Demo Replay)
 
-A real-time person detection, tracking, and threat assessment system that combines computer vision, audio processing, and AI-driven risk analysis to create an autonomous security ecosystem.
+Multimodal realtime threat-detection app that combines:
+- Visual signals (person detection, identity, weapon detection, weapon-person association)
+- Audio signals (VAD, transcript, emotion/intent, distress/anomaly cues)
+- Fusion risk scoring and state machine
 
-## Current System Overview
+This project has two run modes:
+- **Live mode**: realtime camera + microphone
+- **Demo mode**: prerecorded TEST videos fed through the **same realtime pipeline**
 
-### Core Capabilities
-- **Person Detection**: YOLOv8-based real-time person detection
-- **Face Recognition**: FaceNet-powered identity recognition with pre-enrolled faces
-- **Weapon Detection**: Specialized YOLO model for weapon identification
-- **Tracking**: Custom centroid-based person tracking
-- **Alert System**: Email notifications with snapshot attachments
-- **Hand Tracking**: MediaPipe-based weapon-to-person association
-
-### Architecture
-- **Language**: Python 3.8+
-- **Framework**: PyTorch + Ultralytics YOLOv8
-- **Computer Vision**: OpenCV, MediaPipe
-- **Face Recognition**: FaceNet (InceptionResnetV1)
-- **Threading**: Single-threaded with async weapon detection
-
-## System Components
-
-### 1. Visual Pipeline (`camera_detection/yolo_detect.py`)
-**Main processing loop handling:**
-- Real-time video capture and processing
-- Person detection and tracking
-- Face recognition and identity matching
-- Weapon detection and association
-- Threat assessment and alerting
-
-### 2. Face Recognition (`utils/facenet_recognition.py`)
-**Face identification system:**
-- Pre-computed face embeddings storage
-- Real-time face detection and matching
-- MTCNN face detection integration
-- Cosine similarity-based recognition
-
-### 3. Person Tracking (`utils/person_tracker.py`)
-**Custom tracking system:**
-- Centroid-based object tracking
-- Identity persistence across frames
-- Person state management (weapons, labels)
-- Disappeared object handling
-
-### 4. Alert System (`utils/email_alert.py`)
-**Notification system:**
-- Gmail SMTP integration
-- Snapshot attachment capability
-- Configurable alert thresholds
-- Asynchronous email sending
-
-### 5. Drawing Utilities (`utils/drawing.py`)
-**Visualization components:**
-- Bounding box rendering
-- Label and threat level display
-- Weapon association visualization
-- Real-time overlay generation
-
-## Planned Upgrades
-
-### Phase 1: Visual Pipeline Enhancement ✅ (Ready for Implementation)
-**Multi-Object Tracking (MOT) Integration:**
-- Replace custom tracker with YOLOv8's ByteTrack
-- Implement identity caching for performance
-- Add audio-visual interrupt hooks
-- Migrate to dict-based person structures
-
-**Benefits:**
-- Persistent tracking across occlusions
-- 80%+ reduction in FaceNet processing
-- Foundation for cross-modal integration
-
-### Phase 2: Audio Pipeline Implementation 📋 (PRD Received)
-**Status**: Ready for LLD
-**Components**: 3-Stage Hierarchical Processing
-
-**Stage 1: Silero VAD** - Enterprise-grade ONNX-optimized gatekeeper (90% CPU reduction)  
-**Stage 2: DistilHuBERT** - 0.02MB emotion recognition for instant risk boosts  
-**Stage 3: Faster-Whisper + DistilBERT** - INT8 ASR + zero-shot intent classification  
-**Integration**: Conversational Intuition with contextual intent filtering
-
-### Phase 3: Shared Risk Accumulator (SRA)
-**Dynamic Risk Assessment:**
-- 0-100 risk scoring system
-- Multi-modal evidence integration
-- Temporal risk accumulation
-- Configurable alert thresholds
-
-**Capabilities:**
-- Visual + audio evidence combination
-- Progressive threat escalation
-- Historical pattern analysis
-- Adaptive response system
-
-### Phase 4: Advanced Intelligence
-**Enhanced Features:**
-- Person re-identification across sessions
-- Behavior pattern analysis
-- Anomaly detection
-- Predictive threat assessment
-
-## Installation & Setup
-
-### Prerequisites
-```bash
-# Python 3.8+ required
-python --version
-
-# GPU support (optional but recommended)
-nvidia-smi  # Check CUDA availability
-```
-
-### Installation
-```bash
-# Clone repository
-git clone <repository-url>
-cd person_detect/yolo
-
-# Install dependencies
-pip install -r requirements.txt
-
-# For YOLOv8 specific requirements
-pip install -r requirements_yolov8.txt
-```
-
-### Model Setup
-```bash
-# Download YOLOv8 models (automatic on first run)
-# Person model: yolov8n.pt (automatically downloaded)
-# Weapon model: Place weapon_best.pt in models/ directory
-
-# Face embeddings setup
-python enroll_faces.py  # Enroll known faces
-```
-
-### Configuration
-Environment variables in `.env` or system:
-```bash
-# Detection thresholds
-YOLOV8_PERSON_CONF=0.60
-YOLOV8_WEAPON_CLASSES=knife,scissors,gun,pistol,rifle
-
-# Performance settings
-USE_GPU=1  # 0 for CPU-only
-WEAPON_DETECT_EVERY_N_FRAMES=3
-
-# Alert configuration
-ALERT_EMAIL=your-email@gmail.com
-```
-
-## Usage
-
-### Basic Operation
-```bash
-# Start the detection system
-python camera_detection/yolo_detect.py
-
-# CPU-only mode (if GPU issues)
-python camera_detection/yolo_detect.py --cpu
-```
-
-### Face Enrollment
-```bash
-# Enroll new faces for recognition
-python enroll_faces.py
-```
-
-### Testing & Diagnostics
-```bash
-# Run diagnostic tests
-python utils/diagnose_all_tests.py
-
-# Test specific components
-python utils/diagnose_boxes.py
-```
-
-## System Requirements
-
-### Hardware
-- **CPU**: 4+ cores recommended
-- **RAM**: 8GB minimum, 16GB recommended
-- **GPU**: NVIDIA GPU with CUDA (optional)
-- **Camera**: USB webcam or IP camera
-- **Microphone**: Audio input device (future audio pipeline)
-
-### Software
-- **OS**: Windows 10+, Linux (Ubuntu 18.04+), macOS
-- **Python**: 3.8 - 3.11
-- **CUDA**: 11.0+ (if using GPU)
-
-## Performance Characteristics
-
-### Current Performance
-- **Frame Rate**: 30 FPS (GPU), 15 FPS (CPU)
-- **Detection Accuracy**: >90% person detection
-- **Recognition Accuracy**: >85% face recognition
-- **Memory Usage**: ~2GB RAM
-- **CPU Usage**: 40-60% (single thread)
-
-### Target Performance (Post-Upgrades)
-- **Frame Rate**: 30+ FPS sustained
-- **Detection Accuracy**: >95% with MOT
-- **Recognition Accuracy**: >90% with caching
-- **Memory Usage**: <3GB RAM
-- **CPU Usage**: 60-80% (multi-threaded)
-
-## Troubleshooting
-
-### Common Issues
-1. **CUDA Errors**: Set `USE_GPU=0` for CPU-only mode
-2. **Camera Not Found**: Check camera permissions and connections
-3. **Low Performance**: Reduce frame processing or use GPU
-4. **Face Recognition Issues**: Re-enroll faces with better lighting
-
-### Debug Mode
-```bash
-# Enable verbose logging
-export LOG_LEVEL=DEBUG
-python camera_detection/yolo_detect.py
-```
-
-### Performance Monitoring
-- Check console output for FPS and detection counts
-- Monitor system resources with Task Manager
-- Use `utils/diagnose_*` scripts for component testing
-
-## Development Roadmap
-
-### Immediate Next Steps
-1. **Visual Pipeline MOT Integration** - Replace custom tracker
-2. **Identity Caching Implementation** - Performance optimization
-3. **Audio Pipeline Design** - Multi-modal foundation
-4. **SRA System Architecture** - Dynamic risk assessment
-
-### Future Enhancements
-- **Re-ID System**: Cross-session person recognition
-- **Behavior Analysis**: Movement pattern detection
-- **API Integration**: REST/WebSocket interfaces
-- **Mobile Support**: Edge device deployment
-
-## Contributing
-
-### Code Standards
-- Follow PEP 8 Python style guidelines
-- Add type hints for new functions
-- Include comprehensive docstrings
-- Write unit tests for new components
-
-### Testing
-- Run existing diagnostic tests before changes
-- Add new tests for modified components
-- Validate performance impact of changes
-- Test on both CPU and GPU configurations
-
-## License & Attribution
-
-This project integrates several open-source components:
-- **Ultralytics YOLOv8**: Object detection framework
-- **FaceNet PyTorch**: Face recognition implementation
-- **MediaPipe**: Hand tracking and pose estimation
-- **OpenCV**: Computer vision library
-
-## Support & Documentation
-
-### Documentation Files
-- `IMPLEMENTATION_PLAN.md` - Comprehensive upgrade roadmap
-- `VISUAL_PIPELINE_TODO.md` - Visual enhancement details
-- `AUDIO_PIPELINE_TODO.md` - Audio system specifications
-
-### Getting Help
-- Check existing issues and documentation
-- Run diagnostic scripts for system validation
-- Review console logs for error details
-- Test components individually for isolation
+Demo is not a different logic path; it is a replay harness using the same visual/audio/fusion/risk engine.
 
 ---
 
-**Status**: Active Development
-**Version**: Pre-Upgrade (Visual Pipeline Ready, Audio Pipeline Planned)
-**Last Updated**: February 18, 2026</content>
-<parameter name="filePath">c:\programing\MachineLearning\person_detect\yolo\README.md
+## 1) What the app does
+
+- Detects people in video frames
+- Recognizes known identity vs unknown (FaceNet embeddings)
+- Detects weapon-like objects
+- Associates weapons to persons (hand-aware mapping + spatial heuristics)
+- Processes audio segments for transcript, emotion/intent, and acoustic anomalies
+- Computes a risk score from multiple factors using weighted sum + temporal decay
+- Maps score to threat states:
+  - `IDLE`
+  - `CAUTION`
+  - `EVALUATING`
+  - `ALERT`
+  - `CRITICAL`
+- Renders realtime overlay UI with detections, identities, risk, state, and audio factors
+
+---
+
+## 2) Current design principles
+
+- Realtime-first architecture
+- Shared pipeline between live and demo
+- Risk depends on **multiple factors**, not one signal:
+  - visual evidence
+  - emotion
+  - intent
+  - distress/anomaly audio
+  - cross-modal confirmation bonuses
+- Known homeowner with tool/weapon alone is lower baseline risk; audio threat/distress evidence increases escalation.
+
+---
+
+## 3) Project structure
+
+- `main.py` - live entrypoint
+- `core/system_manager.py` - lifecycle orchestration for visual/audio/fusion/capture/display
+- `visual/` - person/weapon detection, tracking, face recognition, association
+- `audio/` - VAD, transcription, emotion, intent pipeline
+- `fusion/` - risk accumulator, state manager, fusion loop
+- `display_manager.py` - UI overlay rendering
+- `tools/demo_test_videos.py` - demo replay runner (same pipeline)
+- `config.yaml` - runtime defaults
+- `TEST/` - prerecorded demo clips
+
+---
+
+## 4) Environment and dependencies (your setup)
+
+Project path:
+- `C:\\programing\\MachineLearning\\threat_detection_system`
+
+Conda env used by scripts:
+- `threat-detect`
+
+Python executable commonly used in this repo:
+- `C:\Users\Amritansu Aditya\.conda\envs\threat-detect\python.exe`
+
+Install requirements:
+
+```powershell
+conda activate threat-detect
+cd C:\\programing\\MachineLearning\\threat_detection_system
+pip install -r requirements.txt
+```
+
+Optional dev deps:
+
+```powershell
+pip install -r requirements-dev.txt
+```
+
+---
+
+## 5) Run commands
+
+### A) Live mode (realtime camera + mic)
+
+From PowerShell:
+
+```powershell
+conda activate threat-detect
+cd C:\\programing\\MachineLearning\\threat_detection_system
+python main.py --verbose
+```
+
+Or with absolute python:
+
+```powershell
+& 'C:\Users\Amritansu Aditya\.conda\envs\threat-detect\python.exe' main.py --verbose
+```
+
+Launcher scripts:
+- `run_threat_detect.bat`
+- `run_threat_detect.ps1`
+
+---
+
+### B) Demo mode (pre-recorded videos through same realtime pipeline)
+
+Run all supported videos in `TEST/`:
+
+```powershell
+& 'C:\Users\Amritansu Aditya\.conda\envs\threat-detect\python.exe' tools\demo_test_videos.py --all
+```
+
+Run one video:
+
+```powershell
+& 'C:\Users\Amritansu Aditya\.conda\envs\threat-detect\python.exe' tools\demo_test_videos.py --video TEST\test3.mp4
+```
+
+Headless:
+
+```powershell
+& 'C:\Users\Amritansu Aditya\.conda\envs\threat-detect\python.exe' tools\demo_test_videos.py --video TEST\test3.mp4 --headless
+```
+
+Save annotated output:
+
+```powershell
+& 'C:\Users\Amritansu Aditya\.conda\envs\threat-detect\python.exe' tools\demo_test_videos.py --all --save-output demo_outputs
+```
+
+Batch helper:
+- `run_test_video_demo.bat`
+
+Demo controls:
+- `q` / `Esc`: quit
+- `n`: next video
+- `Space`: pause/resume
+
+---
+
+## 6) Configuration (`config.yaml`)
+
+Current important defaults:
+
+- `system.target_fps: 30`
+- `system.fusion_hz: 1`
+- `visual.person_model: yolov8n.pt`
+- `visual.weapon_model: camera_detection/models/weapon_best.pt`
+- `visual.person_conf: 0.60`
+- `visual.person_min_area: 3500`
+- `visual.weapon_detect_every_n: 3`
+- `visual.face_recognize_every_n: 30`
+- `audio.sample_rate: 16000`
+- `audio.device: cpu`
+- `audio.vad_model: models/silero_vad.onnx`
+
+Env overrides format:
+
+```powershell
+$env:THREAT_SYSTEM__TARGET_FPS="20"
+$env:THREAT_VISUAL__PERSON_CONF="0.65"
+```
+
+---
+
+## 7) Risk model (current behavior)
+
+Risk uses:
+- temporal decay from previous score
+- weighted sum of visual and audio components
+- cross-modal bonus when audio intent confirms visual concern
+
+High-level factors:
+- Unknown person (after grace period)
+- Weapon associated with person
+- Unknown + associated weapon
+- Emotion intensity (anger/fear)
+- Intent (threat/distress)
+- Sudden anomaly/acoustic distress cues
+- Audio-visual confirmation bonuses
+
+State thresholds map score to:
+- `<20` IDLE
+- `<45` CAUTION
+- `<70` EVALUATING
+- `<90` ALERT
+- `>=90` CRITICAL
+
+---
+
+## 8) Identity and weapon association notes
+
+- Identity from FaceNet embedding comparison (`face_embeddings.npz`)
+- Weapon association uses hand-aware logic first, then stricter spatial fallback
+- Weapon detections are deduplicated to reduce multiple boxes for same object
+- Weapon detections include IDs (e.g., `W1`) for UI traceability
+
+---
+
+## 9) Audio pipeline notes
+
+Pipeline stages:
+1. VAD
+2. Emotion analysis
+3. STT transcription
+4. Intent classification
+5. Acoustic fallback features for distress/anomaly
+
+If transformer models are unavailable (network/cache restrictions), app falls back to heuristic/audio-feature behavior so UI and scoring can still update dynamically.
+
+Transformer control env vars:
+
+```powershell
+$env:THREAT_USE_TRANSFORMER_INTENT="1"
+# Optional: force local cache only
+$env:THREAT_TRANSFORMER_LOCAL_ONLY="1"
+```
+
+---
+
+## 10) Logs and troubleshooting
+
+Primary logs:
+- `threat_detection.log`
+- `debug_output.log`
+
+Common issues:
+- **No camera/mic**: app can still run partially; check device availability.
+- **Transformer load errors**: usually network/cache issue; use local cache or fallback mode.
+- **Too many weapon boxes**: raise thresholds and keep dedupe enabled (already tuned in current code).
+- **Identity flips**: ensure face embeddings quality and lighting; stricter thresholds are already applied.
+
+---
+
+## 11) Testing
+
+General:
+
+```powershell
+conda activate threat-detect
+cd C:\\programing\\MachineLearning\\threat_detection_system
+pytest -q
+```
+
+Focused unit tests (example):
+
+```powershell
+pytest -p no:cacheprovider tests/legacy/test_unit_core.py tests/legacy/test_unit_fusion.py -q
+```
+
+---
+
+## 12) Quick start (recommended)
+
+1. Activate env and install deps.
+2. Run demo first to validate pipeline:
+   - `tools/demo_test_videos.py --all`
+3. Run live mode:
+   - `python main.py --verbose`
+4. Tune `config.yaml` thresholds if needed.
+
+---
+
+## 13) Important reminder
+
+This app is a **realtime decision-support system** and should be tuned with your real scene data.  
+For deployment, validate thresholds and risk behavior clip-by-clip with representative homeowner/unknown/weapon/audio scenarios.
+
