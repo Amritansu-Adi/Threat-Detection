@@ -1,7 +1,11 @@
 # Byte-compiled / optimized / DLL files
 __pycache__/
+**/__pycache__/
 *.py[cod]
 *$py.class
+*.pyc
+*.pyo
+*.pyd
 
 # Virtual environments
 .env
@@ -25,60 +29,16 @@ build/
 
 # Data, models, weights and outputs
 data/
+faces/
 runs/
 weights/
 *.pt
+*.pth
+*.onnx
+*.engine
 camera_detection/models/*.pt
 alerts/
-TEST/out/
-data/*.yaml
-
-# Notebooks
-.ipynb_checkpoints/
-
-# OS files
-.DS_Store
-Thumbs.db
-
-# Logs
-*.log
-
-# Archives
-*.zip
-*.tar.gz
-# Byte-compiled / optimized / DLL files
-__pycache__/
-*.py[cod]
-*$py.class
-
-# Virtual environments
-.env
-.env.*
-.venv/
-venv/
-ENV/
-env/
-.conda/
-
-# VS Code / IDE
-.vscode/
-.idea/
-*.sublime-project
-*.sublime-workspace
-
-# Python packaging
-dist/
-build/
-*.egg-info/
-
-# Data, models, weights and outputs
-data/
-runs/
-weights/
-*.pt
-camera_detection/models/*.pt
-alerts/
-TEST/out/
+TEST/
 data/*.yaml
 demo_outputs/
 validation_output.txt
@@ -89,6 +49,11 @@ Ultralytics/
 fine_tuning_behaviour/checkpoints/
 fine_tuning_behaviour/video_dataset/
 fine_tuning_behaviour/audio_dataset/
+colab/
+
+# Local identity artifacts
+face_embeddings.npz
+known_faces.pt
 
 # Test-generated fixtures
 tests/fixtures/generated/
